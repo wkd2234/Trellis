@@ -1,0 +1,9 @@
+{
+  "version": "0.6.18",
+  "description": "Adds native Antigravity (AGY) plugin, lifecycle hooks, custom subagents, and fork GitHub Release upgrades",
+  "breaking": false,
+  "recommendMigrate": false,
+  "changelog": "**Enhancements:**\n- feat(antigravity): add native AGY plugin (`.agents/plugins/trellis/`) with `plugin.json`, `hooks.json` (`SessionStart`, `PreInvocation`, `PreToolUse` for `run_command` & `invoke_subagent`), shared Python hooks, and custom subagents (`trellis-implement`, `trellis-check`, `trellis-research`).\n- feat(hooks): support AGY protojson payloads (`injectSteps`, `PreToolUse` `decision`/`overwrite`, `workspacePaths` discovery, global plugin detection) across all four shared Python hook scripts.\n- feat(upgrade): point `trellis upgrade`, version checks, and GitHub Actions release publishing to `wkd2234/Trellis` GitHub Releases.",
+  "migrations": [],
+  "notes": "Run `trellis update -f` in existing Antigravity projects (or `trellis init --antigravity` to add Antigravity support) to generate `.agents/plugins/trellis/`."
+}

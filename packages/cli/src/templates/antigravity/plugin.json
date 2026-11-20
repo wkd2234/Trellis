@@ -1,0 +1,12 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "trellis",
+  "displayName": "Trellis",
+  "version": "1.0.0",
+  "description": "Structured AI development workflow hooks and subagents for Trellis-managed repositories.",
+  "author": "Mindfold LLC",
+  "homepage": "https://github.com/wkd2234/Trellis",
+  "repository": "https://github.com/wkd2234/Trellis",
+  "license": "AGPL-3.0-only",
+  "keywords": ["trellis", "workflow", "hooks", "subagents"]
+}

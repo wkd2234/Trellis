@@ -5051,17 +5051,32 @@ print(json.dumps({
         const isShellExecutionEvent = registrations.some(([, c]) =>
           c.includes("beforeShellExecution"),
         );
+        const isAntigravityToolCall = registrations.some(([, c]) =>
+          c.includes('"matcher": "run_command"'),
+        );
 
         const sessionId = `e2e-${platform}`;
         const command = `${pythonCmd} ./.trellis/scripts/task.py start .trellis/tasks/issue-106`;
         const payload = isShellExecutionEvent
           ? { session_id: sessionId, cwd: tmpDir, command }
-          : {
-              session_id: sessionId,
-              cwd: tmpDir,
-              tool_name: "Bash",
-              tool_input: { command },
-            };
+          : isAntigravityToolCall
+            ? {
+                conversationId: sessionId,
+                workspacePaths: [tmpDir],
+                cwd: tmpDir,
+                hookEventName: "PreToolUse",
+                toolCall: {
+                  id: "toolu_e2e",
+                  name: "run_command",
+                  args: { CommandLine: command, Cwd: tmpDir },
+                },
+              }
+            : {
+                session_id: sessionId,
+                cwd: tmpDir,
+                tool_name: "Bash",
+                tool_input: { command },
+              };
 
         const hookOutput = execSync(
           `${pythonCmd} ${JSON.stringify(path.join(tmpDir, hookPath))}`,
@@ -5072,11 +5087,16 @@ print(json.dumps({
             env: hookEnv(),
           },
         );
-        // A shell-execution host wants a permission decision; a tool-call host
-        // reads a schema this hook has no opinion on, so it says nothing.
+        // A shell-execution host wants a permission decision; Antigravity
+        // PreToolUse expects `{"decision": "allow"}`; other tool-call hosts
+        // read a schema this hook has no opinion on, so it says nothing.
         if (isShellExecutionEvent) {
           expect(JSON.parse(hookOutput) as { permission?: string }).toEqual({
             permission: "allow",
+          });
+        } else if (isAntigravityToolCall) {
+          expect(JSON.parse(hookOutput) as { decision?: string }).toEqual({
+            decision: "allow",
           });
         } else {
           expect(hookOutput.trim()).toBe("");
@@ -5128,15 +5148,24 @@ print(json.dumps({
               needle: "Issue 106 task",
             };
         writeSharedHook(contextHook.path, contextHook.name);
+        const contextPayload = isAntigravityToolCall
+          ? {
+              conversationId: sessionId,
+              workspacePaths: [tmpDir],
+              cwd: tmpDir,
+              hookEventName: "PreInvocation",
+              invocationNum: 0,
+            }
+          : {
+              session_id: sessionId,
+              cwd: tmpDir,
+              hook_event_name: "UserPromptSubmit",
+            };
         const contextOutput = execSync(
           `${pythonCmd} ${JSON.stringify(path.join(tmpDir, contextHook.path))}`,
           {
             cwd: tmpDir,
-            input: JSON.stringify({
-              session_id: sessionId,
-              cwd: tmpDir,
-              hook_event_name: "UserPromptSubmit",
-            }),
+            input: JSON.stringify(contextPayload),
             encoding: "utf-8",
             env: hookEnv(),
           },

@@ -98,9 +98,38 @@ def find_trellis_root(start: Path) -> Optional[Path]:
 # Active task discovery
 # ---------------------------------------------------------------------------
 
+def _is_antigravity_payload(input_data: dict) -> bool:
+    return (
+        isinstance(input_data.get("workspacePaths"), list)
+        or isinstance(input_data.get("artifactDirectoryPath"), str)
+        or isinstance(input_data.get("toolCall"), dict)
+    )
+
+
+def _find_trellis_root_from_input(data: dict) -> Optional[Path]:
+    candidates: list[str] = []
+    cwd_val = data.get("cwd")
+    if isinstance(cwd_val, str) and cwd_val.strip():
+        candidates.append(cwd_val)
+    ws_paths = data.get("workspacePaths")
+    if isinstance(ws_paths, list):
+        for ws in ws_paths:
+            if isinstance(ws, str) and ws.strip():
+                candidates.append(ws)
+    candidates.append(os.getcwd())
+
+    for candidate in candidates:
+        root = find_trellis_root(Path(candidate))
+        if root is not None:
+            return root
+    return None
+
+
 def _detect_platform(input_data: dict) -> str | None:
     if isinstance(input_data.get("cursor_version"), str):
         return "cursor"
+    if _is_antigravity_payload(input_data):
+        return "antigravity"
     # CLAUDE_PROJECT_DIR is a compatibility alias that several hosts set
     # alongside their own variable — CodeBuddy, ZCode and Trae all do. It must
     # therefore be checked LAST, or every one of them is detected as claude and
@@ -132,6 +161,8 @@ def _detect_platform(input_data: dict) -> str | None:
         return "cursor"
     if ".codex" in script_parts:
         return "codex"
+    if ".agent" in script_parts or ".agents" in script_parts:
+        return "antigravity"
     if ".gemini" in script_parts:
         return "gemini"
     if ".qoder" in script_parts:
@@ -422,20 +453,31 @@ def main() -> int:
         return 0
 
     data = _load_hook_input()
+    platform = _detect_platform(data)
 
-    cwd_str = data.get("cwd") or os.getcwd()
-    cwd = Path(cwd_str)
+    # Antigravity PreInvocation fires before every model call inside a turn.
+    # Inject once per user turn (invocationNum == 0) so tool-result loops do
+    # not persist duplicate workflow-state steps into the trajectory.
+    if platform == "antigravity":
+        invocation_num = data.get("invocationNum")
+        if isinstance(invocation_num, int) and invocation_num > 0:
+            print("{}")
+            return 0
 
-    root = find_trellis_root(cwd)
+    root = _find_trellis_root_from_input(data)
     if root is None:
+        if platform == "antigravity":
+            print("{}")
         return 0  # not a Trellis project
 
     config = _read_trellis_config(root)
-    if prompt_has_skip_keyword(data.get("prompt", ""), _resolve_skip_keyword(config)):
+    prompt_text = data.get("prompt") or data.get("lastUserInput") or ""
+    if prompt_has_skip_keyword(prompt_text, _resolve_skip_keyword(config)):
+        if platform == "antigravity":
+            print("{}")
         return 0  # user opted out of the per-turn breadcrumb for this turn
 
     templates = load_breadcrumbs(root)
-    platform = _detect_platform(data)
     task = get_active_task(root, data)
     if task is None:
         # No active task — still emit a breadcrumb nudging AI toward
@@ -465,6 +507,21 @@ def main() -> int:
     # hookSpecificOutput JSON path below unchanged.
     if platform == "kiro":
         print(breadcrumb)
+        return 0
+
+    # Antigravity (AGY) PreInvocation expects `injectSteps` with a nested
+    # `systemMessage` object on stdout.
+    if platform == "antigravity":
+        output = {
+            "injectSteps": [
+                {
+                    "systemMessage": {
+                        "systemMessage": breadcrumb,
+                    }
+                }
+            ]
+        }
+        print(json.dumps(output, ensure_ascii=False))
         return 0
 
     # Gemini CLI 0.40.x rejects "UserPromptSubmit" — its per-turn event is

@@ -6,7 +6,8 @@ import inquirer from "inquirer";
 
 import { DIR_NAMES, FILE_NAMES, PATHS } from "../constants/paths.js";
 import type { AITool } from "../types/ai-tools.js";
-import { VERSION, PACKAGE_NAME } from "../constants/version.js";
+import { VERSION } from "../constants/version.js";
+import { resolveUpgradeRepo } from "./upgrade.js";
 import {
   getMigrationsForVersion,
   getAllMigrations,
@@ -1368,18 +1369,29 @@ function getInstalledVersion(cwd: string): string {
 }
 
 /**
- * Fetch latest version from npm registry
+ * Fetch latest version from the fork's GitHub Releases
  */
 async function getLatestNpmVersion(): Promise<string | null> {
+  const repo = resolveUpgradeRepo();
   try {
     const response = await fetch(
-      `https://registry.npmjs.org/${PACKAGE_NAME}/latest`,
+      `https://api.github.com/repos/${repo}/releases/latest`,
+      {
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "trellis-cli",
+        },
+      },
     );
     if (!response.ok) {
       return null;
     }
-    const data = (await response.json()) as { version?: string };
-    return data.version ?? null;
+    const data = (await response.json()) as {
+      tag_name?: string;
+      version?: string;
+    };
+    const raw = data.tag_name ?? data.version;
+    return raw ? raw.replace(/^v/, "") : null;
   } catch {
     return null;
   }

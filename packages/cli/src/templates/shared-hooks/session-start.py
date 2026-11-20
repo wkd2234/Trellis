@@ -165,6 +165,7 @@ def should_skip_injection() -> bool:
         "FACTORY_NON_INTERACTIVE",
         "CURSOR_NON_INTERACTIVE",
         "GEMINI_NON_INTERACTIVE",
+        "ANTIGRAVITY_NON_INTERACTIVE",
         "KIRO_NON_INTERACTIVE",
         "COPILOT_NON_INTERACTIVE",
         "TRAE_NON_INTERACTIVE",
@@ -215,9 +216,29 @@ def _format_git_state(repo_root: Path) -> str:
     return f"Git: branch {branch}; {dirty_text}."
 
 
+def _is_antigravity_payload(input_data: dict) -> bool:
+    return (
+        isinstance(input_data.get("workspacePaths"), list)
+        or isinstance(input_data.get("artifactDirectoryPath"), str)
+        or isinstance(input_data.get("toolCall"), dict)
+    )
+
+
+def _find_trellis_root(start: Path) -> Path | None:
+    current = start.resolve()
+    while True:
+        if (current / ".trellis").is_dir():
+            return current
+        if current == current.parent:
+            return None
+        current = current.parent
+
+
 def _detect_platform(input_data: dict) -> str | None:
     if isinstance(input_data.get("cursor_version"), str):
         return "cursor"
+    if _is_antigravity_payload(input_data):
+        return "antigravity"
     # CLAUDE_PROJECT_DIR is a compatibility alias that several hosts set
     # alongside their own variable — CodeBuddy, ZCode and Trae all do. It must
     # therefore be checked LAST, or every one of them is detected as claude and
@@ -249,6 +270,8 @@ def _detect_platform(input_data: dict) -> str | None:
         return "cursor"
     if ".codex" in script_parts:
         return "codex"
+    if ".agent" in script_parts or ".agents" in script_parts:
+        return "antigravity"
     if ".gemini" in script_parts:
         return "gemini"
     if ".qoder" in script_parts:
@@ -830,7 +853,9 @@ def main():
     except (json.JSONDecodeError, ValueError):
         hook_input = {}
 
-    # Try platform-specific env vars, hook cwd, fallback to cwd
+    platform = _detect_platform(hook_input)
+
+    # Try platform-specific env vars, hook cwd, workspacePaths, fallback to cwd
     project_dir_env_vars = [
         "CLAUDE_PROJECT_DIR",
         "QODER_PROJECT_DIR",
@@ -849,6 +874,26 @@ def main():
         if val:
             project_dir = Path(_normalize_windows_shell_path(val)).resolve()
             break
+    if project_dir is None and platform == "antigravity":
+        candidates: list[str] = []
+        cwd_val = hook_input.get("cwd")
+        if isinstance(cwd_val, str) and cwd_val.strip():
+            candidates.append(cwd_val)
+        ws_paths = hook_input.get("workspacePaths")
+        if isinstance(ws_paths, list):
+            for ws in ws_paths:
+                if isinstance(ws, str) and ws.strip():
+                    candidates.append(ws)
+        for candidate in candidates:
+            found = _find_trellis_root(Path(_normalize_windows_shell_path(candidate)))
+            if found is not None:
+                project_dir = found
+                break
+        if project_dir is None:
+            # Globally installed AGY plugin running in a non-Trellis workspace:
+            # fail open with an empty JSON object instead of injecting noise.
+            print("{}", flush=True)
+            return
     if project_dir is None:
         project_dir = Path(_normalize_windows_shell_path(hook_input.get("cwd", "."))).resolve()
 
@@ -920,11 +965,25 @@ Context loaded. Follow <task-status>. Load workflow/spec/task details only when 
     # Kiro (CLI trellis agent agentSpawn) adds a hook's stdout directly to the
     # conversation context — no JSON envelope. Emit the bare overview text.
     # Conditionally isolated: all other platforms keep the JSON path below.
-    if _detect_platform(hook_input) == "kiro":
+    if platform == "kiro":
         print(context_text, flush=True)
         return
 
-    platform = _detect_platform(hook_input)
+    # Antigravity (AGY) SessionStart expects `injectSteps` with a nested
+    # `systemMessage` object on stdout.
+    if platform == "antigravity":
+        agy_result = {
+            "injectSteps": [
+                {
+                    "systemMessage": {
+                        "systemMessage": context_text,
+                    }
+                }
+            ]
+        }
+        print(json.dumps(agy_result, ensure_ascii=False), flush=True)
+        return
+
     result: dict[str, object] = {
         # Claude Code / Qoder / CodeBuddy / Droid / Gemini / Copilot / Trae /
         # ZCode format.

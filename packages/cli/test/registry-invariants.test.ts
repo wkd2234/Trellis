@@ -195,6 +195,23 @@ describe("UserPromptSubmit hook wiring", () => {
       }
     }
   });
+
+  it("antigravity plugin hooks.json contains PreInvocation referencing inject-workflow-state.py", async () => {
+    const fs = await import("node:fs");
+    const { dirname, join } = await import("node:path");
+    const { fileURLToPath } = await import("node:url");
+    const __filename = fileURLToPath(import.meta.url);
+    const raw = fs.readFileSync(
+      join(dirname(__filename), "..", "src", "templates", "antigravity", "hooks.json"),
+      "utf-8",
+    );
+    const parsed = JSON.parse(raw) as {
+      trellis?: Record<string, unknown>;
+    };
+    expect(parsed.trellis).toBeDefined();
+    expect(Object.keys(parsed.trellis ?? {})).toContain("PreInvocation");
+    expect(raw).toContain("inject-workflow-state.py");
+  });
 });
 
 // =============================================================================

@@ -35,6 +35,7 @@ export type SharedHookPlatform =
   | "cursor"
   | "codex"
   | "gemini"
+  | "antigravity"
   | "qoder"
   | "copilot"
   | "codebuddy"
@@ -111,6 +112,12 @@ export const SHARED_HOOKS_BY_PLATFORM: Record<
     "session-start.py",
     "inject-shell-session-context.py",
     "inject-workflow-state.py",
+  ],
+  antigravity: [
+    "session-start.py",
+    "inject-shell-session-context.py",
+    "inject-workflow-state.py",
+    "inject-subagent-context.py",
   ],
   qoder: [
     "session-start.py",

@@ -87,11 +87,21 @@ def find_repo_root(start_path: str) -> str | None:
     return None
 
 
+def _is_antigravity_payload(input_data: dict) -> bool:
+    return (
+        isinstance(input_data.get("toolCall"), dict)
+        or isinstance(input_data.get("workspacePaths"), list)
+        or isinstance(input_data.get("artifactDirectoryPath"), str)
+    )
+
+
 def _detect_platform(input_data: dict) -> str | None:
     if _hook_event_name(input_data) == "SubagentStart":
         return "codex"
     if isinstance(input_data.get("cursor_version"), str):
         return "cursor"
+    if _is_antigravity_payload(input_data):
+        return "antigravity"
     # CLAUDE_PROJECT_DIR is a compatibility alias that several hosts set
     # alongside their own variable — CodeBuddy, ZCode and Trae all do. It must
     # therefore be checked LAST, or every one of them is detected as claude and
@@ -121,6 +131,8 @@ def _detect_platform(input_data: dict) -> str | None:
         return "claude"
     if ".cursor" in script_parts:
         return "cursor"
+    if ".agent" in script_parts or ".agents" in script_parts:
+        return "antigravity"
     if ".gemini" in script_parts:
         return "gemini"
     if ".qoder" in script_parts:
@@ -1089,6 +1101,176 @@ def _parse_hook_input(input_data: dict) -> tuple[str, str, dict]:
     return "", "", tool_input
 
 
+def _build_subagent_prompt(
+    repo_root: str,
+    input_data: dict,
+    subagent_type: str,
+    original_prompt: str,
+) -> str | None:
+    """Resolve active task and build the context-injected prompt for a Trellis subagent."""
+    if subagent_type not in AGENTS_ALL:
+        return None
+
+    task_dir = get_current_task(
+        repo_root,
+        input_data,
+        allow_single_session_fallback=True,
+    )
+
+    if subagent_type in AGENTS_REQUIRE_TASK:
+        if not task_dir:
+            return None
+        try:
+            root_real = os.path.realpath(repo_root)
+            workflow_real = os.path.realpath(os.path.join(repo_root, ".trellis"))
+            task_dir_full = os.path.realpath(os.path.join(repo_root, task_dir))
+            if not _real_path_contained(root_real, task_dir_full) and not (
+                _real_path_contained(workflow_real, task_dir_full)
+            ):
+                return None
+        except OSError:
+            return None
+        if not os.path.exists(task_dir_full):
+            return None
+
+    is_finish_phase = "[finish]" in original_prompt.lower()
+
+    if subagent_type == AGENT_IMPLEMENT:
+        assert task_dir is not None  # validated above
+        context = get_implement_context(repo_root, task_dir)
+        new_prompt = build_implement_prompt(original_prompt, context)
+    elif subagent_type == AGENT_CHECK:
+        assert task_dir is not None  # validated above
+        if is_finish_phase:
+            context = get_finish_context(repo_root, task_dir)
+            new_prompt = build_finish_prompt(original_prompt, context)
+        else:
+            context = get_check_context(repo_root, task_dir)
+            new_prompt = build_check_prompt(original_prompt, context)
+    elif subagent_type == AGENT_RESEARCH:
+        context = get_research_context(repo_root, task_dir)
+        new_prompt = build_research_prompt(original_prompt, context)
+    else:
+        return None
+
+    if not context:
+        return None
+    return new_prompt
+
+
+def _find_repo_root_from_input(input_data: dict) -> str | None:
+    candidates: list[str] = []
+    cwd_val = _string_value(input_data.get("cwd"))
+    if cwd_val:
+        candidates.append(cwd_val)
+    ws_paths = input_data.get("workspacePaths")
+    if isinstance(ws_paths, list):
+        for ws in ws_paths:
+            ws_str = _string_value(ws)
+            if ws_str:
+                candidates.append(ws_str)
+    candidates.append(os.getcwd())
+
+    for candidate in candidates:
+        repo_root = find_repo_root(candidate)
+        if repo_root:
+            return repo_root
+    return None
+
+
+def _extract_agy_subagent_type(spec: dict) -> str:
+    for key in ("TypeName", "typeName", "subagent_type", "subagentType"):
+        name = _string_value(spec.get(key))
+        if name:
+            return name
+    return ""
+
+
+def _handle_antigravity_pre_tool_use(input_data: dict) -> None:
+    """Handle Antigravity (AGY) PreToolUse for `invoke_subagent`.
+
+    Supports both single-subagent args (`{"TypeName": ..., "Prompt": ...}`) and
+    batch args (`{"Subagents": [{"TypeName": ..., "Prompt": ...}, ...]}`).
+    Always emits a valid AGY PreToolUse JSON object (`{"decision": "allow"}` or
+    with `overwrite`).
+    """
+    tool_call = input_data.get("toolCall")
+    if not isinstance(tool_call, dict):
+        print(json.dumps({"decision": "allow"}))
+        return
+
+    tool_name = _string_value(tool_call.get("name"))
+    args = tool_call.get("args")
+    if tool_name != "invoke_subagent" or not isinstance(args, dict):
+        print(json.dumps({"decision": "allow"}))
+        return
+
+    repo_root = _find_repo_root_from_input(input_data)
+    if not repo_root:
+        print(json.dumps({"decision": "allow"}))
+        return
+
+    # Shape 1: batch `Subagents` array (documented in Antigravity Hooks spec)
+    subagents = args.get("Subagents")
+    if isinstance(subagents, list):
+        updated_list = []
+        changed = False
+        for item in subagents:
+            if not isinstance(item, dict):
+                updated_list.append(item)
+                continue
+            subagent_type = _extract_agy_subagent_type(item)
+            prompt_key = "Prompt" if "Prompt" in item else "prompt"
+            original_prompt = item.get(prompt_key, "")
+            if not isinstance(original_prompt, str):
+                original_prompt = ""
+            new_prompt = _build_subagent_prompt(
+                repo_root, input_data, subagent_type, original_prompt
+            )
+            if new_prompt is not None:
+                updated_item = {**item, prompt_key: new_prompt}
+                updated_list.append(updated_item)
+                changed = True
+            else:
+                updated_list.append(item)
+        if changed:
+            print(
+                json.dumps(
+                    {
+                        "decision": "allow",
+                        "overwrite": {"Subagents": updated_list},
+                    },
+                    ensure_ascii=False,
+                )
+            )
+            return
+        print(json.dumps({"decision": "allow"}))
+        return
+
+    # Shape 2: single-subagent args (`TypeName` + `Prompt`)
+    subagent_type = _extract_agy_subagent_type(args)
+    prompt_key = "Prompt" if "Prompt" in args else "prompt"
+    original_prompt = args.get(prompt_key, "")
+    if not isinstance(original_prompt, str):
+        original_prompt = ""
+    new_prompt = _build_subagent_prompt(
+        repo_root, input_data, subagent_type, original_prompt
+    )
+    if new_prompt is not None:
+        print(
+            json.dumps(
+                {
+                    "decision": "allow",
+                    "overwrite": {prompt_key: new_prompt},
+                },
+                ensure_ascii=False,
+            )
+        )
+        return
+
+    print(json.dumps({"decision": "allow"}))
+
+
 def main():
     if os.environ.get("TRELLIS_HOOKS") == "0" or os.environ.get("TRELLIS_DISABLE_HOOKS") == "1":
         sys.exit(0)
@@ -1109,6 +1291,14 @@ def main():
             pass
         sys.exit(0)
 
+    if isinstance(input_data.get("toolCall"), dict):
+        try:
+            _handle_antigravity_pre_tool_use(input_data)
+        except Exception:
+            # Fail open on AGY PreToolUse so subagent spawning is never blocked.
+            print(json.dumps({"decision": "allow"}))
+        sys.exit(0)
+
     subagent_type, original_prompt, tool_input = _parse_hook_input(input_data)
     cwd = input_data.get("cwd", os.getcwd())
 
@@ -1121,64 +1311,10 @@ def main():
     if not repo_root:
         sys.exit(0)
 
-    # Get current task directory (research doesn't require it)
-    task_dir = get_current_task(
-        repo_root,
-        input_data,
-        allow_single_session_fallback=True,
+    new_prompt = _build_subagent_prompt(
+        repo_root, input_data, subagent_type, original_prompt
     )
-
-    # implement/check need task directory
-    if subagent_type in AGENTS_REQUIRE_TASK:
-        if not task_dir:
-            sys.exit(0)
-        # Contain the pointer before reading anything through it. `task.py` now
-        # refuses to store a ref that leaves the repo, but a session file
-        # written before that fix can still hold one, and `trellis update`
-        # does not rewrite session files — so a poisoned pointer outlives the
-        # upgrade that closed the writer. This is the last hop before the
-        # task's prd.md/design.md reach the model prompt, so it checks again.
-        try:
-            root_real = os.path.realpath(repo_root)
-            # `.trellis` may itself be a symlink into a store outside the
-            # repo (#567); its real location is a second legitimate base.
-            workflow_real = os.path.realpath(os.path.join(repo_root, ".trellis"))
-            task_dir_full = os.path.realpath(os.path.join(repo_root, task_dir))
-            if not _real_path_contained(root_real, task_dir_full) and not (
-                _real_path_contained(workflow_real, task_dir_full)
-            ):
-                sys.exit(0)
-        except OSError:
-            sys.exit(0)
-        if not os.path.exists(task_dir_full):
-            sys.exit(0)
-
-    # Check for [finish] marker in prompt (check agent with finish context)
-    is_finish_phase = "[finish]" in original_prompt.lower()
-
-    # Get context and build prompt based on subagent type
-    if subagent_type == AGENT_IMPLEMENT:
-        assert task_dir is not None  # validated above
-        context = get_implement_context(repo_root, task_dir)
-        new_prompt = build_implement_prompt(original_prompt, context)
-    elif subagent_type == AGENT_CHECK:
-        assert task_dir is not None  # validated above
-        if is_finish_phase:
-            # Finish phase: use finish context (lighter, focused on final verification)
-            context = get_finish_context(repo_root, task_dir)
-            new_prompt = build_finish_prompt(original_prompt, context)
-        else:
-            # Regular check phase: use check context (full specs for self-fix loop)
-            context = get_check_context(repo_root, task_dir)
-            new_prompt = build_check_prompt(original_prompt, context)
-    elif subagent_type == AGENT_RESEARCH:
-        # Research can work without task directory
-        context = get_research_context(repo_root, task_dir)
-        new_prompt = build_research_prompt(original_prompt, context)
-    else:
-        sys.exit(0)
-
-    if not context:
+    if new_prompt is None:
         sys.exit(0)
 
     # Return updated input. Most platforms ignore unrecognized fields, so we

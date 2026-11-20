@@ -338,12 +338,52 @@ describe("init() integration", () => {
     expect(fs.existsSync(path.join(tmpDir, ".cursor"))).toBe(false);
   });
 
-  it("#3d antigravity platform creates .agent/workflows", async () => {
+  it("#3d antigravity platform creates .agent/workflows and .agents/plugins/trellis", async () => {
     await init({ yes: true, antigravity: true });
 
     expect(fs.existsSync(path.join(tmpDir, ".agent", "workflows"))).toBe(true);
     expect(
+      fs.existsSync(path.join(tmpDir, ".agent", "workflows", "continue.md")),
+    ).toBe(true);
+    expect(
+      fs.existsSync(path.join(tmpDir, ".agent", "workflows", "finish-work.md")),
+    ).toBe(true);
+    expect(
       fs.existsSync(path.join(tmpDir, ".agent", "workflows", "start.md")),
+    ).toBe(false);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".agents", "plugins", "trellis", "plugin.json"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(tmpDir, ".agents", "plugins", "trellis", "hooks.json"),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(
+          tmpDir,
+          ".agents",
+          "plugins",
+          "trellis",
+          "hooks",
+          "session-start.py",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      fs.existsSync(
+        path.join(
+          tmpDir,
+          ".agents",
+          "plugins",
+          "trellis",
+          "agents",
+          "trellis-implement.md",
+        ),
+      ),
     ).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, ".claude"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, ".cursor"))).toBe(false);

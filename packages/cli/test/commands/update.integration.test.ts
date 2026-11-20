@@ -880,7 +880,7 @@ describe("update() integration", () => {
     // sub-agent-less platforms are added, and this assertion is about the
     // block surviving the update, not about who is currently in it.
     expect(readProjectFile(PATHS.WORKFLOW_GUIDE_FILE)).toContain(
-      "[codex-inline, Kilo, Antigravity, Devin",
+      "[codex-inline, Kilo, Devin",
     );
     expect(readProjectFile(PATHS.WORKFLOW_GUIDE_FILE)).not.toContain("[Codex]");
 
@@ -953,10 +953,10 @@ describe("update() integration", () => {
       "fetch",
       vi.fn().mockImplementation((input: string | URL) => {
         const url = String(input);
-        if (url.includes("registry.npmjs.org")) {
+        if (url.includes("api.github.com/repos/")) {
           return Promise.resolve({
             ok: true,
-            json: () => Promise.resolve({ version: VERSION }),
+            json: () => Promise.resolve({ tag_name: `v${VERSION}` }),
           });
         }
         return Promise.resolve({ status: 404, ok: false });
@@ -992,10 +992,10 @@ describe("update() integration", () => {
       "fetch",
       vi.fn().mockImplementation((input: string | URL) => {
         const url = String(input);
-        if (url.includes("registry.npmjs.org")) {
+        if (url.includes("api.github.com/repos/")) {
           return Promise.resolve({
             ok: true,
-            json: () => Promise.resolve({ version: VERSION }),
+            json: () => Promise.resolve({ tag_name: `v${VERSION}` }),
           });
         }
         return Promise.resolve({ status: 404, ok: false });
@@ -1039,10 +1039,10 @@ describe("update() integration", () => {
       "fetch",
       vi.fn().mockImplementation((input: string | URL) => {
         const url = String(input);
-        if (url.includes("registry.npmjs.org")) {
+        if (url.includes("api.github.com/repos/")) {
           return Promise.resolve({
             ok: true,
-            json: () => Promise.resolve({ version: VERSION }),
+            json: () => Promise.resolve({ tag_name: `v${VERSION}` }),
           });
         }
         return Promise.resolve({
@@ -1571,9 +1571,9 @@ describe("update() integration", () => {
       "[Gemini, Qoder, Copilot, Reasonix, Trae, Grok, Kimi Code]",
     );
     expect(updated).toContain(
-      "[/Claude Code, Cursor, OpenCode, codex-sub-agent, CodeBuddy, Droid, Pi, ZCode, Snow, Oh My Pi]",
+      "[/Claude Code, Cursor, OpenCode, codex-sub-agent, CodeBuddy, Droid, Pi, ZCode, Snow, Oh My Pi, Antigravity]",
     );
-    expect(updated).toContain("[codex-inline, Kilo, Antigravity, Devin");
+    expect(updated).toContain("[codex-inline, Kilo, Devin");
     expect(updated).not.toContain("[Codex]");
     expect(updated).not.toContain("[Kilo, Antigravity, Windsurf]");
     expect(updated).not.toContain("legacy body");

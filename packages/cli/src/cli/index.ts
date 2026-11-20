@@ -78,7 +78,7 @@ program
   .option("--kilo", "Include Kilo CLI commands")
   .option("--kiro", "Include Kiro Code skills")
   .option("--gemini", "Include Gemini CLI commands")
-  .option("--antigravity", "Include Antigravity workflows")
+  .option("--antigravity", "Include Antigravity plugin, hooks, agents, and workflows")
   .option("--devin", "Include Devin workflows")
   .option("--windsurf", "Deprecated alias for --devin (Windsurf was renamed)")
   .option("--qoder", "Include Qoder commands")
@@ -186,10 +186,10 @@ program
 
 program
   .command("upgrade")
-  .description("Upgrade the global Trellis CLI package")
+  .description("Upgrade the global Trellis CLI package from GitHub Releases")
   .option(
     "--tag <tag>",
-    "npm dist-tag or version to install (default follows current channel: latest, beta, or rc)",
+    "GitHub Release tag or version to install (default: latest; e.g., v0.6.18 or 0.6.17-agy.1)",
   )
   .option("--dry-run", "Print the install command without running it")
   .action(async (options: Record<string, unknown>) => {

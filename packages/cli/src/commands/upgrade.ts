@@ -1,6 +1,19 @@
 import { spawnSync } from "node:child_process";
 import chalk from "chalk";
-import { PACKAGE_NAME, VERSION } from "../constants/version.js";
+import { VERSION } from "../constants/version.js";
+
+export const DEFAULT_UPGRADE_REPO = "wkd2234/Trellis";
+export const RELEASE_ASSET_NAME = "trellis-cli.tgz";
+
+export function resolveUpgradeRepo(): string {
+  const envRepo = process.env.TRELLIS_UPGRADE_REPO?.trim();
+  if (envRepo && envRepo.length > 0) {
+    return envRepo;
+  }
+  return DEFAULT_UPGRADE_REPO;
+}
+
+export const UPGRADE_REPO = resolveUpgradeRepo();
 
 export interface UpgradeOptions {
   tag?: string;
@@ -34,24 +47,32 @@ export interface UpgradeCommandPlan {
   binaryCheckCommand: string;
 }
 
-const NPM_TAG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const RELEASE_TAG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export function resolveUpgradeTag(
-  currentVersion: string = VERSION,
+  _currentVersion: string = VERSION,
   requestedTag?: string,
 ): string {
-  if (requestedTag) {
-    if (!NPM_TAG_RE.test(requestedTag)) {
-      throw new Error(
-        `Invalid npm tag/version "${requestedTag}". Use a simple dist-tag or version such as latest, beta, rc, or 0.6.0-beta.8.`,
-      );
-    }
-    return requestedTag;
+  if (!requestedTag || requestedTag === "latest") {
+    return "latest";
   }
 
-  if (currentVersion.includes("-beta")) return "beta";
-  if (currentVersion.includes("-rc")) return "rc";
-  return "latest";
+  if (!RELEASE_TAG_RE.test(requestedTag)) {
+    throw new Error(
+      `Invalid release tag/version "${requestedTag}". Use "latest" or a GitHub release tag such as v0.6.18 or 0.6.17-agy.1.`,
+    );
+  }
+  return requestedTag.startsWith("v") ? requestedTag : `v${requestedTag}`;
+}
+
+export function buildReleaseTarballUrl(
+  tag: string,
+  repo: string = resolveUpgradeRepo(),
+): string {
+  if (tag === "latest") {
+    return `https://github.com/${repo}/releases/latest/download/${RELEASE_ASSET_NAME}`;
+  }
+  return `https://github.com/${repo}/releases/download/${tag}/${RELEASE_ASSET_NAME}`;
 }
 
 function binaryCheckCommand(
@@ -64,9 +85,10 @@ export function buildUpgradeCommand(
   options: UpgradeOptions = {},
   currentVersion: string = VERSION,
   platform: NodeJS.Platform = process.platform,
+  repo: string = resolveUpgradeRepo(),
 ): UpgradeCommandPlan {
   const tag = resolveUpgradeTag(currentVersion, options.tag);
-  const target = `${PACKAGE_NAME}@${tag}`;
+  const target = buildReleaseTarballUrl(tag, repo);
   const npmArgs = ["install", "-g", target];
   const displayCommand = `npm ${npmArgs.join(" ")}`;
   const spawnOptions: SpawnOptions = { stdio: "inherit", shell: false };

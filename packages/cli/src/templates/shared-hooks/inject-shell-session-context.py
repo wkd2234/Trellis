@@ -54,8 +54,18 @@ TOOL_INPUT_KEYS = ("tool_input", "toolInput")
 # Answering a shell-execution event with an explicit allow is what keeps
 # Cursor from re-prompting for a command Trellis itself asked for. Tool-call
 # hosts read a different response schema, so they get no answer at all rather
-# than a key they would have to ignore.
+# than a key they would have to ignore. Antigravity PreToolUse requires a JSON
+# decision object on stdout (`{"decision": "allow"}`).
 SHELL_EVENT_RESPONSE = {"permission": "allow"}
+AGY_TOOL_ALLOW_RESPONSE = {"decision": "allow"}
+
+
+def _is_antigravity_payload(hook_input: dict[str, Any]) -> bool:
+    return (
+        isinstance(hook_input.get("toolCall"), dict)
+        or isinstance(hook_input.get("workspacePaths"), list)
+        or isinstance(hook_input.get("artifactDirectoryPath"), str)
+    )
 
 
 def _string_value(value: Any) -> str | None:
@@ -81,9 +91,22 @@ def _resolve_trellis_root(hook_input: dict[str, Any]) -> Path | None:
     and survives a host that runs hooks from elsewhere), then fall back.
     """
     candidates: list[Path] = []
+    tool_call = hook_input.get("toolCall")
+    if isinstance(tool_call, dict):
+        args = tool_call.get("args")
+        if isinstance(args, dict):
+            tool_cwd = _string_value(args.get("Cwd") or args.get("cwd"))
+            if tool_cwd:
+                candidates.append(Path(tool_cwd))
     payload_cwd = _string_value(hook_input.get("cwd"))
     if payload_cwd:
         candidates.append(Path(payload_cwd))
+    ws_paths = hook_input.get("workspacePaths")
+    if isinstance(ws_paths, list):
+        for ws in ws_paths:
+            ws_str = _string_value(ws)
+            if ws_str:
+                candidates.append(Path(ws_str))
     try:
         candidates.append(Path(os.getcwd()))
     except OSError:
@@ -117,6 +140,8 @@ def _pending_shell_command(hook_input: dict[str, Any]) -> tuple[str, dict[str, A
 
     - shell-execution event (Cursor `beforeShellExecution`) — the command sits
       at the top level and the host wants a permission decision back;
+    - Antigravity `PreToolUse` (`toolCall.args.CommandLine`) — the host expects
+      `{"decision": "allow"}` on stdout;
     - tool-call event (`PreToolUse`, `BeforeTool`) — the command sits under
       `tool_input`, and the host reads a schema this hook has no opinion on.
 
@@ -126,6 +151,15 @@ def _pending_shell_command(hook_input: dict[str, Any]) -> tuple[str, dict[str, A
     command = _string_value(hook_input.get("command"))
     if command:
         return command, SHELL_EVENT_RESPONSE
+
+    tool_call = hook_input.get("toolCall")
+    if isinstance(tool_call, dict):
+        args = tool_call.get("args")
+        if isinstance(args, dict):
+            command = _string_value(args.get("CommandLine") or args.get("command"))
+            if command:
+                return command, AGY_TOOL_ALLOW_RESPONSE
+        return "", AGY_TOOL_ALLOW_RESPONSE
 
     for key in TOOL_INPUT_KEYS:
         tool_input = hook_input.get(key)
@@ -138,17 +172,19 @@ def _pending_shell_command(hook_input: dict[str, Any]) -> tuple[str, dict[str, A
     return "", None
 
 
-def _host_platform_name() -> str | None:
-    """Name the host from the config directory this hook was installed into.
+def _host_platform_name(hook_input: dict[str, Any] | None = None) -> str | None:
+    """Name the host from the payload or the config directory this hook was installed into.
 
-    Every platform puts its hooks under its own dotted directory
-    (`.cursor/hooks/`, `.factory/hooks/`, …), so the deepest dotted path
-    segment identifies the host without a table of platform names here. It
-    matters because the context key must agree with the one the platform's
-    other hooks compute — a ticket keyed differently would write a session
-    file no later hook ever reads.
+    Antigravity plugins may live under `.agents/plugins/trellis/hooks/` or
+    globally under `~/.gemini/config/plugins/trellis/hooks/`, so payload
+    detection runs first before falling back to path-segment inference.
     """
-    for part in reversed(Path(sys.argv[0]).parts):
+    if isinstance(hook_input, dict) and _is_antigravity_payload(hook_input):
+        return "antigravity"
+    script_parts = Path(sys.argv[0]).parts
+    if ".agent" in script_parts or ".agents" in script_parts:
+        return "antigravity"
+    for part in reversed(script_parts):
         if part.startswith(".") and part not in (".", "..") and len(part) > 1:
             return part[1:]
     return None
@@ -226,8 +262,12 @@ def _write_ticket(
         # and subcommand — never on this field.
         "platform": platform_name,
         "context_key": context_key,
-        "conversation_id": _string_value(hook_input.get("conversation_id")),
-        "session_id": _string_value(hook_input.get("session_id")),
+        "conversation_id": _string_value(
+            hook_input.get("conversation_id") or hook_input.get("conversationId")
+        ),
+        "session_id": _string_value(
+            hook_input.get("session_id") or hook_input.get("sessionId")
+        ),
         "generation_id": _string_value(hook_input.get("generation_id")),
         # The resolved project root, not the payload's cwd. The consumer
         # rejects a ticket whose cwd is outside the repo, and CodeBuddy IDE
@@ -249,6 +289,11 @@ def _write_ticket(
     )
 
 
+def _emit_agy_allow_if_needed(is_agy: bool) -> None:
+    if is_agy:
+        print(json.dumps(AGY_TOOL_ALLOW_RESPONSE, ensure_ascii=False))
+
+
 def main() -> int:
     if os.environ.get("TRELLIS_HOOKS") == "0" or os.environ.get("TRELLIS_DISABLE_HOOKS") == "1":
         return 0
@@ -260,27 +305,33 @@ def main() -> int:
     if not isinstance(hook_input, dict):
         hook_input = {}
 
+    is_agy = _is_antigravity_payload(hook_input)
     command, response = _pending_shell_command(hook_input)
     subcommands = _extract_task_subcommands(command)
     if not subcommands:
+        _emit_agy_allow_if_needed(is_agy)
         return 0
 
     root = _resolve_trellis_root(hook_input)
     if root is None:
+        _emit_agy_allow_if_needed(is_agy)
         return 0
 
     if not _has_context_identity(hook_input):
+        _emit_agy_allow_if_needed(is_agy)
         return 0
 
-    platform_name = _host_platform_name()
+    platform_name = _host_platform_name(hook_input)
     resolve_context_key = _load_active_task_resolver(root)
     context_key = resolve_context_key(hook_input, platform=platform_name)
     if not context_key:
+        _emit_agy_allow_if_needed(is_agy)
         return 0
 
     try:
         _write_ticket(root, hook_input, context_key, command, platform_name, subcommands)
     except OSError:
+        _emit_agy_allow_if_needed(is_agy)
         return 0
 
     if response is not None:

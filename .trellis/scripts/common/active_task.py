@@ -57,6 +57,7 @@ _KNOWN_PLATFORMS = {
     "zcode",
     "snow",
     "dsh",
+    "antigravity",
 }
 
 # Every name below records how it was checked. Do NOT add a name by analogy

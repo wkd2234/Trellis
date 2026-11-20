@@ -1,0 +1,40 @@
+{
+  "trellis": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "{{PYTHON_CMD}} ./hooks/session-start.py",
+        "timeout": 30
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "{{PYTHON_CMD}} ./hooks/inject-workflow-state.py",
+        "timeout": 15
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON_CMD}} ./hooks/inject-shell-session-context.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "invoke_subagent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{PYTHON_CMD}} ./hooks/inject-subagent-context.py",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

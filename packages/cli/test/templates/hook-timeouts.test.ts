@@ -198,4 +198,38 @@ describe("hook-timeouts: default timeouts survive Windows Python cold start (iss
       }
     });
   }
+
+  describe("antigravity", () => {
+    const raw = readFileSync(
+      join(TEMPLATES_ROOT, "antigravity/hooks.json"),
+      "utf-8",
+    );
+    const parsed = JSON.parse(raw) as Record<
+      string,
+      {
+        SessionStart?: { timeout?: number }[];
+        PreInvocation?: { timeout?: number }[];
+      }
+    >;
+
+    it(`SessionStart timeout >= ${MIN_SESSION_START_S}s`, () => {
+      const hooks = parsed.trellis?.SessionStart ?? [];
+      expect(hooks.length).toBeGreaterThan(0);
+      for (const hook of hooks) {
+        expect(typeof hook.timeout).toBe("number");
+        expect(hook.timeout as number).toBeGreaterThanOrEqual(
+          MIN_SESSION_START_S,
+        );
+      }
+    });
+
+    it(`PreInvocation (inject-workflow-state) timeout >= ${MIN_USER_PROMPT_S}s`, () => {
+      const hooks = parsed.trellis?.PreInvocation ?? [];
+      expect(hooks.length).toBeGreaterThan(0);
+      for (const hook of hooks) {
+        expect(typeof hook.timeout).toBe("number");
+        expect(hook.timeout as number).toBeGreaterThanOrEqual(MIN_USER_PROMPT_S);
+      }
+    });
+  });
 });

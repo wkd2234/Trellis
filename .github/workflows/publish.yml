@@ -1,39 +1,40 @@
-name: Publish to npm
+name: Release CLI Tarballs
 
-# Both event sources stay wired so a published GitHub Release and a raw
-# `v*` tag push both fire a publish. The shared release-preflight script
-# makes reruns idempotent: if a package version is already on npm it is
-# skipped, so duplicate triggers do not produce duplicate publishes.
+# Automatically builds and attaches `trellis-cli.tgz` + `trellis-core.tgz` to
+# GitHub Releases whenever a `v*` tag is pushed (or via manual dispatch).
+# Other machines can then install/upgrade with zero npm token:
+#   npm install -g https://github.com/wkd2234/Trellis/releases/latest/download/trellis-cli.tgz
+#   trellis upgrade
 on:
-  release:
-    types: [published]
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create/update (e.g. v0.6.17-agy.1)"
+        required: true
+        type: string
 
 concurrency:
-  group: publish-${{ github.ref_name || github.ref }}
+  group: release-${{ github.ref_name || inputs.tag }}
   cancel-in-progress: false
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      # Required for npm provenance attestations.
-      id-token: write
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          submodules: recursive
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          registry-url: "https://registry.npmjs.org"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -43,50 +44,37 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify version alignment (core, cli, git tag)
-        run: node packages/cli/scripts/release-preflight.js check-versions --require-tag
-
       - name: Typecheck (core + cli)
         run: pnpm typecheck
 
-      # Build before test: integration tests spawn the real CLI via
-      # bin/trellis.js, which imports dist/ and needs build output to exist.
-      - name: Build (core then cli)
+      - name: Build (core + cli)
         run: pnpm build
 
       - name: Test (core + cli)
         run: pnpm test
 
-      - name: Verify packed CLI pins core to exact version
-        run: node packages/cli/scripts/release-preflight.js verify-packed-cli
+      - name: Resolve release tag
+        id: meta
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
-      - name: Compute publish plan
-        id: plan
-        run: node packages/cli/scripts/release-preflight.js publish-plan --github
+      - name: Pack release tarballs
+        run: |
+          node packages/cli/scripts/pack-release.js \
+            --tag "${{ steps.meta.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --out release-assets
 
-      - name: Publish @mindfoldhq/trellis-core
-        if: steps.plan.outputs.core_publish == 'true'
-        run: pnpm publish --access public --no-git-checks --tag ${{ steps.plan.outputs.tag }}
-        working-directory: packages/core
+      - name: Publish GitHub Release
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Skip @mindfoldhq/trellis-core (already on npm)
-        if: steps.plan.outputs.core_publish != 'true'
-        run: echo "@mindfoldhq/trellis-core@${{ steps.plan.outputs.version }} already published; skipping."
-
-      - name: Publish @mindfoldhq/trellis
-        if: steps.plan.outputs.cli_publish == 'true'
-        run: pnpm publish --access public --no-git-checks --tag ${{ steps.plan.outputs.tag }}
-        working-directory: packages/cli
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
-
-      - name: Skip @mindfoldhq/trellis (already on npm)
-        if: steps.plan.outputs.cli_publish != 'true'
-        run: echo "@mindfoldhq/trellis@${{ steps.plan.outputs.version }} already published; skipping."
-
-      - name: Verify published packages on public npm
-        run: node packages/cli/scripts/release-preflight.js verify-npm --package all
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-assets/trellis-cli.tgz release-assets/trellis-core.tgz --clobber
+          else
+            gh release create "$TAG" release-assets/trellis-cli.tgz release-assets/trellis-core.tgz \
+              --title "$TAG" \
+              --generate-notes
+          fi

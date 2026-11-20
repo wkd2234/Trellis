@@ -170,6 +170,15 @@ class CLIAdapter:
         mapped_name = self.get_agent_name(agent)
         if self.platform == "codex":
             return self.get_config_dir(project_root) / "agents" / f"{mapped_name}.toml"
+        if self.platform == "antigravity":
+            return (
+                project_root
+                / ".agents"
+                / "plugins"
+                / "trellis"
+                / "agents"
+                / f"{mapped_name}.md"
+            )
         return self.get_config_dir(project_root) / "agents" / f"{mapped_name}.md"
 
     def get_commands_path(self, project_root: Path, *parts: str) -> Path:
@@ -861,10 +870,11 @@ def detect_platform(project_root: Path) -> Platform:
     ):
         return "kiro"
 
-    # Check for Antigravity workflow directory only when no other platform config exists
+    # Check for Antigravity workflow or plugin directory only when no other platform config exists
     if (
-        project_root / ".agent" / "workflows"
-    ).is_dir() and not _has_other_platform_dir(
+        (project_root / ".agent" / "workflows").is_dir()
+        or (project_root / ".agents" / "plugins" / "trellis").is_dir()
+    ) and not _has_other_platform_dir(
         project_root, {".agent", ".gemini"}
     ):
         return "antigravity"
