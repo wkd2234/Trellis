@@ -35,7 +35,7 @@ if callable(_stdin_reconfigure):
 DIR_WORKFLOW = ".trellis"
 DIR_RUNTIME = ".runtime"
 DIR_SHELL_TICKETS = "shell-tickets"
-SESSION_SUBCOMMANDS = {"start", "current", "finish"}
+SESSION_SUBCOMMANDS = {"create", "start", "current", "finish"}
 TICKET_TTL_SECONDS = 30
 CONTEXT_IDENTITY_KEYS = (
     "session_id",
@@ -199,23 +199,110 @@ def _load_active_task_resolver(root: Path):
     return resolve_context_key
 
 
-def _extract_task_subcommands(command: str) -> list[dict[str, str]]:
-    try:
-        tokens = shlex.split(command, posix=os.name != "nt")
-    except ValueError:
-        return []
+_SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "(", ")", "{", "}", "\n", "\r"})
+_SHELL_REDIR_TOKENS = frozenset({">", ">>", "<", "<<", "<&", ">&", "2>", "2>>", "1>", "1>>", "&>", "&>>"})
 
+
+def _unquote_token(token: str) -> str:
+    """Strip one layer of matching outer single/double quotes (Windows posix=False)."""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        return token[1:-1]
+    return token
+
+
+def _is_separator_token(token: str) -> bool:
+    if token in _SHELL_SEPARATORS:
+        return True
+    # shlex may group adjacent newlines/separators like "\r\n" or ";;"
+    return bool(token) and all(ch in ";|&(){}\r\n" for ch in token)
+
+
+def _tokenize_shell_segments(command: str) -> list[list[str]]:
+    """Split a compound shell/PowerShell command into per-command token lists.
+
+    Unlike plain ``shlex.split(command)`` (which leaves ``;`` / ``&&`` glued
+    onto adjacent arguments like ``11-23-foo;`` or ``current;``), enabling
+    ``punctuation_chars`` separates shell operators outside quotes while
+    keeping quoted strings (including ``;`` / ``&&`` inside a task title) intact.
+    """
+    lex = shlex.shlex(
+        command,
+        posix=os.name != "nt",
+        punctuation_chars=";&|(){}<>\r\n",
+    )
+    lex.whitespace = " \t"
+    lex.whitespace_split = True
+    lex.commenters = ""
+
+    segments: list[list[str]] = []
+    current: list[str] = []
+    while True:
+        try:
+            token = lex.get_token()
+        except ValueError:
+            # Recover any complete segments parsed before a trailing unmatched quote.
+            break
+        if token is None or token == lex.eof:
+            break
+        if _is_separator_token(token):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _is_task_script_token(token: str) -> bool:
+    unquoted = _unquote_token(token)
+    if not unquoted:
+        return False
+    return unquoted.replace("\\", "/").rsplit("/", 1)[-1] == "task.py"
+
+
+def _extract_start_task_ref(args: list[str]) -> str | None:
+    """Extract the positional task_ref from ``task.py start`` arguments."""
+    skip_next = False
+    for raw in args:
+        if skip_next:
+            skip_next = False
+            continue
+        token = _unquote_token(raw)
+        if not token:
+            continue
+        if token in _SHELL_REDIR_TOKENS or token.endswith(">") or token.endswith("<"):
+            skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        return token
+    return None
+
+
+def _extract_task_subcommands(command: str) -> list[dict[str, str]]:
     subcommands: list[dict[str, str]] = []
-    for index, token in enumerate(tokens[:-1]):
-        if Path(token.strip("\"'")).name != "task.py":
-            continue
-        name = tokens[index + 1]
-        if name not in SESSION_SUBCOMMANDS:
-            continue
-        item = {"name": name}
-        if name == "start" and index + 2 < len(tokens):
-            item["task_ref"] = tokens[index + 2]
-        subcommands.append(item)
+    for segment in _tokenize_shell_segments(command):
+        for index, token in enumerate(segment[:-1]):
+            if not _is_task_script_token(token):
+                continue
+            name = _unquote_token(segment[index + 1])
+            if name not in SESSION_SUBCOMMANDS:
+                continue
+            rest = segment[index + 2 :]
+            if name == "create":
+                if any(_unquote_token(arg) == "--no-start" for arg in rest):
+                    break
+                subcommands.append({"name": "create"})
+                break
+            item = {"name": name}
+            if name == "start":
+                task_ref = _extract_start_task_ref(rest)
+                if task_ref:
+                    item["task_ref"] = task_ref
+            subcommands.append(item)
+            break
     return subcommands
 
 

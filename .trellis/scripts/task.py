@@ -244,7 +244,8 @@ def cmd_start(args: argparse.Namespace) -> int:
         ))
         print(colored(
             "Hint: run inside an AI IDE/session that exposes session identity, "
-            "or set TRELLIS_CONTEXT_ID before running task.py start.",
+            "or set TRELLIS_CONTEXT_ID=<platform>_<session_id> "
+            "(e.g. antigravity_<conversationId>) before running task.py start.",
             Colors.YELLOW,
         ))
 

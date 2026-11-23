@@ -384,6 +384,246 @@ describe("antigravity plugin hooks runtime contract", () => {
     expect(ticket.conversation_id).toBe("conv-agy-3");
   });
 
+  it("shell-ticket bridge supports task.py create (skipping --no-start) so planning state activates immediately", () => {
+    const taskScript = path.join(tmpDir, ".trellis", "scripts", "task.py");
+
+    // 1. `create --no-start` must NOT write a shell ticket.
+    const outNoStart = runHook("inject-shell-session-context.py", {
+      conversationId: "conv-create-1",
+      workspacePaths: [tmpDir],
+      cwd: tmpDir,
+      hookEventName: "PreToolUse",
+      toolCall: {
+        id: "toolu_create_0",
+        name: "run_command",
+        args: {
+          CommandLine: `${pythonCmd} ./.trellis/scripts/task.py create "No Start Task" --slug no-start-demo --no-start`,
+          Cwd: tmpDir,
+        },
+      },
+    });
+    expect(JSON.parse(outNoStart)).toEqual({ decision: "allow" });
+    expect(
+      fs.existsSync(path.join(tmpDir, ".trellis", ".runtime", "shell-tickets")),
+    ).toBe(false);
+
+    // 2. Normal `create` (even chained with `; git status`) writes a create ticket
+    //    and real `task.py create` consumes it to activate the planning pointer.
+    const outCreate = runHook("inject-shell-session-context.py", {
+      conversationId: "conv-create-1",
+      workspacePaths: [tmpDir],
+      cwd: tmpDir,
+      hookEventName: "PreToolUse",
+      toolCall: {
+        id: "toolu_create_1",
+        name: "run_command",
+        args: {
+          CommandLine: `${pythonCmd} ./.trellis/scripts/task.py create "AGY; Planning && Demo" --description "Demo planning task" --slug agy-plan; git status`,
+          Cwd: tmpDir,
+        },
+      },
+    });
+    expect(JSON.parse(outCreate)).toEqual({ decision: "allow" });
+
+    execFileSync(
+      pythonCmd,
+      [
+        taskScript,
+        "create",
+        "AGY; Planning && Demo",
+        "--description",
+        "Demo planning task",
+        "--slug",
+        "agy-plan",
+      ],
+      { cwd: tmpDir, encoding: "utf-8", env: cleanHookEnv() },
+    );
+
+    const sessionFile = path.join(
+      tmpDir,
+      ".trellis",
+      ".runtime",
+      "sessions",
+      "antigravity_conv-create-1.json",
+    );
+    expect(fs.existsSync(sessionFile)).toBe(true);
+    const sessionData = JSON.parse(fs.readFileSync(sessionFile, "utf-8")) as {
+      current_task: string;
+    };
+    expect(sessionData.current_task).toContain("agy-plan");
+
+    // PreInvocation immediately sees planning state instead of no_task.
+    const wfOut = runHook("inject-workflow-state.py", {
+      conversationId: "conv-create-1",
+      workspacePaths: [tmpDir],
+      artifactDirectoryPath: path.join(tmpDir, ".artifacts"),
+      hookEventName: "PreInvocation",
+      invocationNum: 0,
+      lastUserInput: "write the prd",
+      cwd: tmpDir,
+    });
+    const wfParsed = JSON.parse(wfOut) as {
+      injectSteps: { systemMessage: { systemMessage: string } }[];
+    };
+    expect(wfParsed.injectSteps[0].systemMessage.systemMessage).toContain(
+      "agy-plan (planning)",
+    );
+  });
+
+  it("shell-ticket bridge strips compound shell separators (; && || {}) so chained task.py start/current/finish work", () => {
+    const taskScript = path.join(tmpDir, ".trellis", "scripts", "task.py");
+
+    const outCompound = runHook("inject-shell-session-context.py", {
+      conversationId: "conv-compound-1",
+      workspacePaths: [tmpDir],
+      cwd: tmpDir,
+      hookEventName: "PreToolUse",
+      toolCall: {
+        id: "toolu_compound_1",
+        name: "run_command",
+        args: {
+          CommandLine:
+            `${pythonCmd} ./.trellis/scripts/task.py start --allow-empty-context .trellis/tasks/01-agy-demo; ` +
+            `if ($LASTEXITCODE -eq 0) { ${pythonCmd} ./.trellis/scripts/task.py current}; ` +
+            `${pythonCmd} ./.trellis/scripts/task.py finish&& echo done`,
+          Cwd: tmpDir,
+        },
+      },
+    });
+    expect(JSON.parse(outCompound)).toEqual({ decision: "allow" });
+
+    const ticketDir = path.join(tmpDir, ".trellis", ".runtime", "shell-tickets");
+    const [ticketFile] = fs.readdirSync(ticketDir);
+    const ticket = JSON.parse(
+      fs.readFileSync(path.join(ticketDir, ticketFile), "utf-8"),
+    ) as { subcommands: { name: string; task_ref?: string }[] };
+    expect(ticket.subcommands).toEqual([
+      { name: "start", task_ref: ".trellis/tasks/01-agy-demo" },
+      { name: "current" },
+      { name: "finish" },
+    ]);
+
+    // Real task.py start / current / finish all match the ticket cleanly.
+    const startOut = execFileSync(
+      pythonCmd,
+      [taskScript, "start", "--allow-empty-context", ".trellis/tasks/01-agy-demo"],
+      { cwd: tmpDir, encoding: "utf-8", env: cleanHookEnv() },
+    );
+    expect(startOut).toContain("Source: session:antigravity_conv-compound-1");
+
+    const currentOut = execFileSync(
+      pythonCmd,
+      [taskScript, "current", "--source"],
+      { cwd: tmpDir, encoding: "utf-8", env: cleanHookEnv() },
+    );
+    expect(currentOut).toContain("Current task: .trellis/tasks/01-agy-demo");
+    expect(currentOut).toContain("Source: session:antigravity_conv-compound-1");
+
+    const finishOut = execFileSync(pythonCmd, [taskScript, "finish"], {
+      cwd: tmpDir,
+      encoding: "utf-8",
+      env: cleanHookEnv(),
+    });
+    expect(finishOut).toContain("Cleared current task");
+  });
+
+  it("handles bare TRELLIS_CONTEXT_ID=<conversationId> without prefix mismatch or cross-session bleed", () => {
+    const taskScript = path.join(tmpDir, ".trellis", "scripts", "task.py");
+    const bareConvId = "bf44cf96-1111-2222-3333-444455556666";
+
+    // Case A (no ticket): manual bare TRELLIS_CONTEXT_ID writes `<uuid>.json`,
+    // and AGY PreInvocation hook still resolves it via exact-ID fallback.
+    execFileSync(
+      pythonCmd,
+      [taskScript, "start", ".trellis/tasks/01-agy-demo"],
+      {
+        cwd: tmpDir,
+        encoding: "utf-8",
+        env: { ...cleanHookEnv(), TRELLIS_CONTEXT_ID: bareConvId },
+      },
+    );
+    const bareSessionPath = path.join(
+      tmpDir,
+      ".trellis",
+      ".runtime",
+      "sessions",
+      `${bareConvId}.json`,
+    );
+    expect(fs.existsSync(bareSessionPath)).toBe(true);
+
+    const wfSame = runHook("inject-workflow-state.py", {
+      conversationId: bareConvId,
+      workspacePaths: [tmpDir],
+      artifactDirectoryPath: path.join(tmpDir, ".artifacts"),
+      hookEventName: "PreInvocation",
+      invocationNum: 0,
+      cwd: tmpDir,
+    });
+    expect(
+      (
+        JSON.parse(wfSame) as {
+          injectSteps: { systemMessage: { systemMessage: string } }[];
+        }
+      ).injectSteps[0].systemMessage.systemMessage,
+    ).toContain("Task: 01-agy-demo (in_progress)");
+
+    // Different conversationId must NOT inherit the bare session file.
+    const wfOther = runHook("inject-workflow-state.py", {
+      conversationId: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      workspacePaths: [tmpDir],
+      artifactDirectoryPath: path.join(tmpDir, ".artifacts"),
+      hookEventName: "PreInvocation",
+      invocationNum: 0,
+      cwd: tmpDir,
+    });
+    expect(
+      (
+        JSON.parse(wfOther) as {
+          injectSteps: { systemMessage: { systemMessage: string } }[];
+        }
+      ).injectSteps[0].systemMessage.systemMessage,
+    ).toContain("Status: no_task");
+
+    // Case B (with ticket): bare TRELLIS_CONTEXT_ID canonicalizes to
+    // `antigravity_<uuid>.json` and removes the stale bare `<uuid>.json`.
+    runHook("inject-shell-session-context.py", {
+      conversationId: bareConvId,
+      workspacePaths: [tmpDir],
+      cwd: tmpDir,
+      hookEventName: "PreToolUse",
+      toolCall: {
+        id: "toolu_bare_canon",
+        name: "run_command",
+        args: {
+          CommandLine: `${pythonCmd} ./.trellis/scripts/task.py start .trellis/tasks/01-agy-demo`,
+          Cwd: tmpDir,
+        },
+      },
+    });
+    const canonOut = execFileSync(
+      pythonCmd,
+      [taskScript, "start", ".trellis/tasks/01-agy-demo"],
+      {
+        cwd: tmpDir,
+        encoding: "utf-8",
+        env: { ...cleanHookEnv(), TRELLIS_CONTEXT_ID: bareConvId },
+      },
+    );
+    expect(canonOut).toContain(`Source: session:antigravity_${bareConvId}`);
+    expect(
+      fs.existsSync(
+        path.join(
+          tmpDir,
+          ".trellis",
+          ".runtime",
+          "sessions",
+          `antigravity_${bareConvId}.json`,
+        ),
+      ),
+    ).toBe(true);
+    expect(fs.existsSync(bareSessionPath)).toBe(false);
+  });
+
   it("PreToolUse invoke_subagent overwrites Prompt (single) and Subagents (batch), and passes through non-Trellis agents", () => {
     const sessionDir = path.join(tmpDir, ".trellis", ".runtime", "sessions");
     fs.mkdirSync(sessionDir, { recursive: true });

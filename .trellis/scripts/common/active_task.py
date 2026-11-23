@@ -33,7 +33,7 @@ DIR_SHELL_TICKETS = "shell-tickets"
 # platform that works today.
 DIR_LEGACY_CURSOR_SHELL_TICKETS = "cursor-shell"
 SHELL_TICKET_TTL_SECONDS = 30
-TASK_SESSION_COMMANDS = {"start", "current", "finish"}
+TASK_SESSION_COMMANDS = {"create", "start", "current", "finish"}
 
 _SESSION_KEYS = ("session_id", "sessionId", "sessionID")
 _CONVERSATION_KEYS = ("conversation_id", "conversationId", "conversationID")
@@ -415,6 +415,8 @@ def _pending_ticket_matches_args(ticket: dict[str, Any], repo_root: Path) -> boo
     command_name = args[0]
     if command_name not in TASK_SESSION_COMMANDS:
         return False
+    if command_name == "create" and "--no-start" in args[1:]:
+        return False
 
     subcommands = ticket.get("subcommands")
     if not isinstance(subcommands, list):
@@ -427,7 +429,10 @@ def _pending_ticket_matches_args(ticket: dict[str, Any], repo_root: Path) -> boo
             continue
         if command_name != "start":
             return True
-        task_ref = args[1] if len(args) > 1 else None
+        task_ref = next(
+            (arg for arg in args[1:] if arg and not arg.startswith("-")),
+            None,
+        )
         if _task_refs_match(_string_value(subcommand.get("task_ref")), task_ref, repo_root):
             return True
 
@@ -512,6 +517,27 @@ def _lookup_shell_ticket_context_key() -> str | None:
     return None
 
 
+def _bare_id_from_context_key(context_key: str) -> str | None:
+    """Return the unprefixed raw ID when ``context_key`` has a known platform prefix."""
+    if "_" not in context_key:
+        return None
+    prefix, raw_id = context_key.split("_", 1)
+    if prefix in _KNOWN_PLATFORMS and raw_id and not raw_id.startswith("transcript_"):
+        return raw_id
+    return None
+
+
+def _raw_input_context_key(platform_input: dict[str, Any] | None) -> str | None:
+    """Return the sanitized raw session/conversation ID from hook input, if any."""
+    data = _as_dict(platform_input)
+    if not data:
+        return None
+    raw = _lookup_string(data, _SESSION_KEYS) or _lookup_string(data, _CONVERSATION_KEYS)
+    if not raw:
+        return None
+    return _sanitize_key(raw) or _hash_value(raw)
+
+
 def resolve_context_key(
     platform_input: dict[str, Any] | None = None,
     platform: str | None = None,
@@ -526,7 +552,20 @@ def resolve_context_key(
     if allow_environment_context:
         override = _string_value(os.environ.get("TRELLIS_CONTEXT_ID"))
         if override:
-            return _sanitize_key(override) or _hash_value(override)
+            sanitized = _sanitize_key(override) or _hash_value(override)
+            # If a user/agent manually passed a bare session/conversation UUID
+            # while a fresh matching shell ticket already recorded the canonical
+            # `<platform>_<uuid>` key for this exact command, adopt the prefixed
+            # key so hooks (which include the platform prefix) read the same file.
+            if (
+                platform_input is None
+                and platform is None
+                and _bare_id_from_context_key(sanitized) is None
+            ):
+                ticket_key = _lookup_shell_ticket_context_key()
+                if ticket_key and _bare_id_from_context_key(ticket_key) == sanitized:
+                    return ticket_key
+            return sanitized
 
     data = _as_dict(platform_input)
     platform_name = _detect_platform(data, platform) if data or platform else None
@@ -671,6 +710,17 @@ def resolve_active_task(
         if active:
             return active
 
+        # Exact-ID fallback: if a user/agent manually ran `task.py` with a bare
+        # `TRELLIS_CONTEXT_ID=<uuid>` (no `<platform>_` prefix), honor that
+        # exact same session/conversation ID file without cross-session bleed.
+        raw_key = _raw_input_context_key(platform_input) or _bare_id_from_context_key(context_key)
+        if raw_key and raw_key != context_key:
+            raw_context = _read_json(_context_path(repo_root, raw_key)) or {}
+            raw_task_ref = _string_value(raw_context.get("current_task"))
+            raw_active = _active_from_ref(raw_task_ref, repo_root, "session", raw_key)
+            if raw_active:
+                return raw_active
+
     if allow_single_session_fallback:
         fallback = _resolve_single_session_fallback(repo_root)
         if fallback is not None:
@@ -756,6 +806,11 @@ def set_active_task(
     context.setdefault("current_run", None)
     if not _write_json(context_path, context):
         return None
+    bare_id = _bare_id_from_context_key(context_key)
+    if bare_id:
+        bare_path = _context_path(repo_root, bare_id)
+        if bare_path.is_file():
+            _remove_file(bare_path)
     return ActiveTask(canonical, "session", context_key)
 
 
@@ -776,6 +831,11 @@ def clear_active_task(
     context_path = _context_path(repo_root, previous.context_key)
     if context_path.is_file():
         _remove_file(context_path)
+    bare_id = _bare_id_from_context_key(context_key)
+    if bare_id and bare_id != previous.context_key:
+        bare_path = _context_path(repo_root, bare_id)
+        if bare_path.is_file():
+            _remove_file(bare_path)
     return previous
 
 

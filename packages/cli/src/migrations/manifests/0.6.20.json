@@ -1,0 +1,9 @@
+{
+  "version": "0.6.20",
+  "description": "Fixes shell-ticket session bridging for task.py create, compound shell commands, and bare TRELLIS_CONTEXT_ID prefix alignment",
+  "breaking": false,
+  "recommendMigrate": false,
+  "changelog": "**Fixes:**\n- fix(hooks): include `task.py create` in shell-ticket session subcommands (skipping `--no-start`) so Phase 1 planning state activates immediately on Antigravity and other shell-ticket platforms.\n- fix(hooks): split compound shell/PowerShell commands on unquoted operators (`;`, `&&`, `||`, `|`, `&`, `{}`, `()`, redirects, newlines) in `inject-shell-session-context.py` so chained commands no longer glue separators onto `current`/`finish`/`task_ref` tokens.\n- fix(scripts): canonicalize bare `TRELLIS_CONTEXT_ID=<uuid>` overrides against matching fresh shell tickets, add exact-ID read fallback + cleanup in `active_task.py`, and clarify `<platform>_<session_id>` in `task.py`'s degraded-mode hint.",
+  "migrations": [],
+  "notes": "Run `trellis update` inside existing projects to update `.trellis/scripts/` and `.agents/plugins/trellis/hooks/inject-shell-session-context.py`."
+}
