@@ -131,7 +131,7 @@ export function registerChannelCommand(program: Command): void {
     .option("--text-file <path>", "read message body from file")
     .option(
       "--delivery-mode <mode>",
-      "targeted delivery validation: appendOnly | requireKnownWorker | requireRunningWorker",
+      "targeted delivery validation (exits non-zero on undeliverable): appendOnly | requireKnownWorker | requireRunningWorker",
     )
     .argument(
       "[text]",
@@ -334,6 +334,14 @@ export function registerChannelCommand(program: Command): void {
       "spawn-time live-worker budget for this project/scope (default 6; 0 disables)",
       parseNonNegativeInteger,
     )
+    .option(
+      "--foreground",
+      "keep supervisor attached in the foreground until worker exits (recommended for Windows agent shells that terminate detached child processes)",
+    )
+    .option(
+      "--ready-timeout <duration>",
+      "max time to wait for supervisor startup to write durable 'spawned' event (default 15s)",
+    )
     .action(async (name: string, raw: Record<string, unknown>) => {
       const opts = raw as {
         agent?: string;
@@ -352,6 +360,8 @@ export function registerChannelCommand(program: Command): void {
         inboxPolicy?: string;
         idleTimeout?: string;
         maxLiveWorkers?: number;
+        foreground?: boolean;
+        readyTimeout?: string;
       };
       if (opts.provider !== undefined && !isProvider(opts.provider)) {
         console.error(
@@ -379,6 +389,8 @@ export function registerChannelCommand(program: Command): void {
           inboxPolicy: parseInboxPolicy(opts.inboxPolicy),
           idleTimeoutMs: parseDuration(opts.idleTimeout),
           maxLiveWorkers: opts.maxLiveWorkers,
+          foreground: opts.foreground,
+          readyTimeoutMs: parseDuration(opts.readyTimeout),
         });
       } catch (err) {
         console.error(

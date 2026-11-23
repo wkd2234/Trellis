@@ -201,6 +201,7 @@ diffing against `<worker>.inbox-cursor` while debugging the supervisor.
 | worker never speaks | provider startup / prompt / MCP delay | inspect `<worker>.log`, `ps`, raw events |
 | channel not found in another cwd | project bucket mismatch | `cd` to project, use `--scope global`, or `list --all-projects` |
 | ghost worker in list | supervisor died without cleanup | `trellis channel kill <name> --as <worker> --force` |
+| detached worker vanishes on Windows | host shell Job Object reaps detached child on command exit | use `trellis channel spawn ... --foreground` in a background task, or `trellis channel run` |
 | forum thread looks scrambled | parsed `events.jsonl` directly | use `forum`, `thread`, `messages --thread` |
 
 ## Storage Layout

@@ -1,0 +1,9 @@
+{
+  "version": "0.6.19",
+  "description": "Fixes Windows detached channel supervisor reaping, spawn startup race/stderr loss, and strict send silent exit-0",
+  "breaking": false,
+  "recommendMigrate": false,
+  "changelog": "**Fixes & Enhancements:**\n- feat(channel): add `trellis channel spawn --foreground` and `--ready-timeout` so Windows / host shells that reap detached children on command exit can host supervisors cleanly inside background tasks.\n- fix(channel): capture supervisor startup stderr into `<worker>.log` (instead of `stdio: \"ignore\"`), wait for durable `spawned` event before reporting success, and fail non-zero with log excerpt on startup error or timeout.\n- fix(channel): fail non-zero in `trellis channel send --delivery-mode requireKnownWorker|requireRunningWorker` when any target is undeliverable (including dead supervisor PIDs on disk).\n- fix(channel): keep `trellis channel run` supervisor attached (`detach: false`) and send with `deliveryMode: \"requireRunningWorker\"`.",
+  "migrations": [],
+  "notes": "In Windows agent shells that terminate detached processes when a command exits, run `trellis channel spawn ... --foreground` in a background task or use `trellis channel run`."
+}

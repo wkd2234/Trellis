@@ -84,10 +84,10 @@ Behavior:
 - `--to` with one entry stores a string; multiple stores an array; omitted
   means broadcast.
 - `--delivery-mode` selects targeted-delivery validation:
-  - `appendOnly` (default-ish — just record),
-  - `requireKnownWorker` (the named target must have a `spawned` event),
-  - `requireRunningWorker` (the worker must currently be live).
-- Prints the appended event as one JSON line on stdout.
+  - `appendOnly` (default — just record),
+  - `requireKnownWorker` (the named target must have a `spawned` event; records `undeliverable` and exits `1` otherwise),
+  - `requireRunningWorker` (the worker must currently be live in the event log and, when a supervisor `.pid` file exists, still alive at the OS level; records `undeliverable` and exits `1` otherwise).
+- Prints the appended event as one JSON line on stdout on success.
 
 > **Note:** `send` has **no** `--tag` and **no** `--kind` flag. See
 > [`tag-vs-kind`](#tag-vs-kind--how-event-shape-is-actually-controlled) below.
@@ -232,12 +232,20 @@ trellis channel spawn <name>
                                           # default 5m, 0 disables
   [--max-live-workers <n>]                # spawn-time live-worker budget
                                           # default 6, 0 disables
+  [--foreground]                          # stay attached in foreground until exit
+  [--ready-timeout <Ns|Nm|Nh>]            # wait for durable `spawned` (default 15s)
 ```
 
 Behavior:
 - Provider is validated against the adapter registry
   (`packages/cli/src/commands/channel/adapters/`); current: `claude`,
   `codex`.
+- Captures supervisor startup stderr into `<worker>.log` and waits for the
+  durable `spawned` event before printing `{"pid","log","worker"}` (exits `1`
+  with log details if startup fails or times out).
+- With `--foreground`, prints the ready JSON once `spawned` is durable,
+  releases spawn locks, and stays attached until the worker exits (use inside
+  background/daemon tasks on Windows shells that reap detached processes).
 - Worker stays inbox-idle until the first `send --to <worker>`.
 - Records a `spawned` event with `pid`, `provider`, `agent`, `files`,
   `manifests`.

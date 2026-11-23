@@ -208,15 +208,17 @@ describe("channel storage and forum channels", () => {
     });
   });
 
-  it("writes undeliverable events for strict CLI delivery mode", async () => {
+  it("writes undeliverable events and fails non-zero for strict CLI delivery mode", async () => {
     await createChannel("strict-send", { by: "main" });
 
-    await channelSend("strict-send", {
-      as: "main",
-      text: "hello",
-      to: "ghost",
-      deliveryMode: "requireKnownWorker",
-    });
+    await expect(
+      channelSend("strict-send", {
+        as: "main",
+        text: "hello",
+        to: "ghost",
+        deliveryMode: "requireKnownWorker",
+      }),
+    ).rejects.toThrow(/undeliverable.*ghost.*worker-unknown/i);
 
     const events = await readChannelEvents(
       "strict-send",
@@ -228,6 +230,77 @@ describe("channel storage and forum channels", () => {
       messageSeq: 2,
       reason: "worker-unknown",
       origin: "cli",
+    });
+  });
+
+  it("rejects requireRunningWorker when a spawned worker's supervisor pid is dead", async () => {
+    await createChannel("dead-pid-send", { by: "main" });
+    const proj = projectKey(projectDir);
+    const { appendEvent } = await import(
+      "../../src/commands/channel/store/events.js"
+    );
+    await appendEvent(
+      "dead-pid-send",
+      { kind: "spawned", by: "main", as: "reaped", provider: "codex" },
+      proj,
+    );
+    // Simulate a supervisor reaped abruptly (e.g. Windows Job Object) without
+    // writing a `killed` event: `.pid` remains on disk pointing at a dead PID.
+    const deadPid = 999_999_999;
+    fs.writeFileSync(
+      workerFile("dead-pid-send", "reaped", "pid", proj),
+      String(deadPid),
+      "utf-8",
+    );
+
+    await expect(
+      channelSend("dead-pid-send", {
+        as: "main",
+        text: "ping",
+        to: "reaped",
+        deliveryMode: "requireRunningWorker",
+      }),
+    ).rejects.toThrow(/reaped.*no longer running/i);
+
+    const events = await readChannelEvents("dead-pid-send", proj);
+    expect(events.at(-1)).toMatchObject({
+      kind: "undeliverable",
+      targetWorker: "reaped",
+      reason: "worker-terminal",
+      origin: "cli",
+    });
+  });
+
+  it("succeeds under requireRunningWorker when worker is spawned and alive", async () => {
+    await createChannel("live-pid-send", { by: "main" });
+    const proj = projectKey(projectDir);
+    const { appendEvent } = await import(
+      "../../src/commands/channel/store/events.js"
+    );
+    await appendEvent(
+      "live-pid-send",
+      { kind: "spawned", by: "main", as: "alive-w", provider: "codex" },
+      proj,
+    );
+    fs.writeFileSync(
+      workerFile("live-pid-send", "alive-w", "pid", proj),
+      String(process.pid),
+      "utf-8",
+    );
+
+    await channelSend("live-pid-send", {
+      as: "main",
+      text: "ping",
+      to: "alive-w",
+      deliveryMode: "requireRunningWorker",
+    });
+
+    const events = await readChannelEvents("live-pid-send", proj);
+    expect(events.some((e) => e.kind === "undeliverable")).toBe(false);
+    expect(events.at(-1)).toMatchObject({
+      kind: "message",
+      to: "alive-w",
+      text: "ping",
     });
   });
 

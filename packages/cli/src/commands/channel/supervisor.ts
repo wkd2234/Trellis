@@ -229,7 +229,7 @@ export async function runSupervisor(
   };
 
   const logPath = workerFile(channelName, workerName, "log", project);
-  const log = fs.createWriteStream(logPath);
+  const log = fs.createWriteStream(logPath, { flags: "a" });
   const resolvedProvider = resolveProviderPath(adapter.provider, config.cwd);
   const resolvedProviderDisplay = [
     resolvedProvider.command,
@@ -246,6 +246,7 @@ export async function runSupervisor(
       cwd: config.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     },
   ) as Child;
 

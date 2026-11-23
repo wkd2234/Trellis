@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,12 @@ import {
   formatBudgetOverflowError,
   resolveWorkerGuardConfig,
 } from "./guard.js";
-import { withLock } from "./store/lock.js";
+import {
+  readChannelEvents,
+  readLastSeq,
+  type ChannelEvent,
+} from "./store/events.js";
+import { acquireLock, releaseLock, withLock } from "./store/lock.js";
 import {
   channelDir,
   projectDir,
@@ -25,6 +30,11 @@ import {
 } from "./store/paths.js";
 import { parseChannelScope } from "./store/schema.js";
 import { writeSupervisorConfig } from "./supervisor.js";
+
+/** Default max wait for the supervisor to emit a durable `spawned` event. */
+export const DEFAULT_READY_TIMEOUT_MS = 15_000;
+const READY_POLL_INTERVAL_MS = 50;
+const MAX_LOG_EXCERPT_CHARS = 1200;
 
 export interface SpawnOptions {
   provider?: Provider;
@@ -59,6 +69,35 @@ export interface SpawnOptions {
    * spawn-time budget check. Overrides env / config / built-in default.
    */
   maxLiveWorkers?: number;
+  /**
+   * Keep the supervisor attached in the foreground until it exits instead
+   * of detaching and returning immediately. Recommended inside Windows or
+   * sandboxed agent shells that terminate detached background processes when
+   * a synchronous command exits.
+   */
+  foreground?: boolean;
+  /**
+   * Max milliseconds to wait for the supervisor to write a durable `spawned`
+   * event before failing startup (default 15s).
+   */
+  readyTimeoutMs?: number;
+  /**
+   * Internal: whether to detach the supervisor child process (defaults to
+   * `!foreground`). `channel run` sets `detach: false` so the one-shot
+   * supervisor stays inside the parent's process tree / Windows Job Object.
+   */
+  detach?: boolean;
+  /**
+   * Internal test seam: override the command/args launched for the supervisor.
+   */
+  supervisorLaunch?: {
+    command: string;
+    args: (ctx: {
+      channelName: string;
+      workerName: string;
+      configPath: string;
+    }) => string[];
+  };
 }
 
 interface ResolvedSpawn {
@@ -158,6 +197,22 @@ function safeIdentifier(s: string): string {
   return s.replace(/[\r\n\x00-\x08\x0b-\x1f\x7f]/g, "");
 }
 
+interface LaunchedSupervisor {
+  child: ChildProcess;
+  pid: number;
+  pidPath: string;
+  configPath: string;
+  reservationPath: string;
+  logPath: string;
+  baselineSeq: number;
+  exitPromise: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+  getExitState: () => {
+    exited: boolean;
+    code: number | null;
+    signal: NodeJS.Signals | null;
+  };
+}
+
 export async function channelSpawn(
   channelName: string,
   opts: SpawnOptions,
@@ -185,10 +240,14 @@ export async function channelSpawn(
       ? { flagMaxLiveWorkers: opts.maxLiveWorkers }
       : {}),
   });
-  // Serialize the budget check across the whole project bucket. A per-worker
-  // lock is not enough: two different worker names could otherwise both see
-  // a free slot and fork supervisors at the same time.
-  return withLock(
+
+  const workerLock = workerLockPath(channelName, resolved.as, ref.project);
+
+  // Serialize the project-wide budget check only across reservation + OS spawn
+  // (~tens of ms). Holding the project lock through startup readiness would
+  // block parallel spawns of distinct workers; instead we hold only the
+  // per-worker lock while waiting for durable `spawned`.
+  const launched = await withLock(
     path.join(projectDir(ref.project), ".worker-guard.lock"),
     async () => {
       const guard = await enforceSpawnBudget({
@@ -212,32 +271,62 @@ export async function channelSpawn(
         );
       }
 
-      // Acquire the worker-level lock so a concurrent spawn / kill can't race
-      // with us. The lock is released as soon as we've handed off to a detached
-      // supervisor (pid file in place).
-      return withLock(
-        workerLockPath(channelName, resolved.as, ref.project),
-        async () => {
-          return spawnLocked(
-            channelName,
-            resolved,
-            opts,
-            ref.project,
-            guardPolicy.idleTimeoutMs,
-          );
-        },
-      );
+      await acquireLock(workerLock);
+      try {
+        return await launchSupervisor(
+          channelName,
+          resolved,
+          opts,
+          ref.project,
+          guardPolicy.idleTimeoutMs,
+        );
+      } catch (err) {
+        releaseLock(workerLock);
+        throw err;
+      }
     },
   );
+
+  const readyTimeoutMs = opts.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
+  try {
+    await waitForSupervisorReady({
+      channelName,
+      workerName: resolved.as,
+      project: ref.project,
+      launched,
+      readyTimeoutMs,
+      foreground: opts.foreground === true,
+    });
+  } catch (err) {
+    cleanupFailedSpawn(channelName, resolved.as, ref.project, launched);
+    throw err;
+  } finally {
+    releaseLock(workerLock);
+  }
+
+  const result = {
+    pid: launched.pid,
+    log: launched.logPath,
+    worker: resolved.as,
+  };
+  console.log(JSON.stringify(result));
+
+  if (opts.foreground) {
+    await waitForForegroundExit(launched);
+    return result;
+  }
+
+  launched.child.unref();
+  return result;
 }
 
-async function spawnLocked(
+async function launchSupervisor(
   channelName: string,
   resolved: ResolvedSpawn,
   opts: SpawnOptions,
   project: string,
   idleTimeoutMs: number,
-): Promise<{ pid: number; log: string; worker: string }> {
+): Promise<LaunchedSupervisor> {
   // Re-check worker name not already busy (now safe under the lock).
   const pidPath = workerFile(channelName, resolved.as, "pid", project);
   if (fs.existsSync(pidPath)) {
@@ -282,7 +371,8 @@ async function spawnLocked(
     project,
   );
 
-  const supervisorBinary = resolveCliEntry();
+  const baselineSeq = await readLastSeq(channelName, project);
+  const logPath = workerFile(channelName, resolved.as, "log", project);
   const reservationPath = workerFile(
     channelName,
     resolved.as,
@@ -298,32 +388,69 @@ async function spawnLocked(
     }),
     "utf-8",
   );
-  const child = spawn(
-    process.execPath,
-    [
-      supervisorBinary,
-      "channel",
-      "__supervisor",
-      channelName,
-      resolved.as,
-      configPath,
-    ],
-    {
-      detached: true,
-      stdio: "ignore",
-      // Propagate the current project bucket so the detached supervisor
-      // resolves paths into the SAME bucket the CLI just wrote into,
-      // regardless of where the supervisor's process.cwd() ends up.
+
+  // Truncate and open the worker log in append mode so BOTH early supervisor
+  // stderr (Node module / crash output before supervisor.ts creates its stream)
+  // and supervisor.ts's append-mode log stream land in `<worker>.log` without
+  // overwriting each other or causing EPIPE after the parent exits.
+  fs.mkdirSync(path.dirname(logPath), { recursive: true });
+  fs.writeFileSync(logPath, "", "utf-8");
+  const logFd = fs.openSync(logPath, "a");
+
+  const launchCommand = opts.supervisorLaunch?.command ?? process.execPath;
+  const launchArgs = opts.supervisorLaunch
+    ? opts.supervisorLaunch.args({
+        channelName,
+        workerName: resolved.as,
+        configPath,
+      })
+    : [
+        resolveCliEntry(),
+        "channel",
+        "__supervisor",
+        channelName,
+        resolved.as,
+        configPath,
+      ];
+  const shouldDetach = opts.foreground ? false : (opts.detach ?? true);
+
+  let child: ChildProcess;
+  try {
+    child = spawn(launchCommand, launchArgs, {
+      detached: shouldDetach,
+      windowsHide: true,
+      stdio: ["ignore", "ignore", logFd],
+      // Propagate the current project bucket so the supervisor resolves paths
+      // into the SAME bucket the CLI just wrote into, regardless of cwd.
       env: {
         ...process.env,
         TRELLIS_CHANNEL_PROJECT: project,
       },
-    },
-  );
+    });
+  } finally {
+    try {
+      fs.closeSync(logFd);
+    } catch {
+      // ignore
+    }
+  }
 
-  // Wait for either successful spawn or an error event before considering
-  // the supervisor "launched". Without this the parent would happily return
-  // pid=-1 on a missing node binary or fork failure.
+  let exited = false;
+  let exitCode: number | null = null;
+  let exitSignal: NodeJS.Signals | null = null;
+  const exitPromise = new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+  }>((resolve) => {
+    child.once("exit", (code, signal) => {
+      exited = true;
+      exitCode = code;
+      exitSignal = signal;
+      resolve({ code, signal });
+    });
+  });
+
+  // Wait for either successful OS spawn or an error event before writing pid.
   await new Promise<void>((resolve, reject) => {
     let settled = false;
     child.once("spawn", () => {
@@ -352,18 +479,252 @@ async function spawnLocked(
       );
     });
   });
+
+  const pid = child.pid ?? -1;
   if (child.pid !== undefined) {
     fs.writeFileSync(pidPath, String(child.pid));
   }
-  child.unref();
 
-  const result = {
-    pid: child.pid ?? -1,
-    log: workerFile(channelName, resolved.as, "log", project),
-    worker: resolved.as,
+  return {
+    child,
+    pid,
+    pidPath,
+    configPath,
+    reservationPath,
+    logPath,
+    baselineSeq,
+    exitPromise,
+    getExitState: () => ({ exited, code: exitCode, signal: exitSignal }),
   };
-  console.log(JSON.stringify(result));
-  return result;
+}
+
+interface StartupInspection {
+  status: "pending" | "ready" | "failed";
+  errorMessage?: string;
+}
+
+function inspectStartupEvents(
+  events: ChannelEvent[],
+  baselineSeq: number,
+  workerName: string,
+): StartupInspection {
+  const fresh = events.filter((ev) => ev.seq > baselineSeq);
+  const spawned = fresh.find(
+    (ev) => ev.kind === "spawned" && ev.as === workerName,
+  );
+  const supervisorAuthor = `supervisor:${workerName}`;
+
+  if (spawned) {
+    // Detect immediate post-spawn crash/kill that landed before spawn returned.
+    for (const ev of fresh) {
+      if (ev.seq <= spawned.seq) continue;
+      if (
+        ev.kind === "error" &&
+        (ev.by === supervisorAuthor ||
+          (ev.by === workerName && ev.synthesized === true))
+      ) {
+        return {
+          status: "failed",
+          errorMessage:
+            ev.message ?? `worker '${workerName}' crashed right after spawn`,
+        };
+      }
+      if (
+        ev.kind === "killed" &&
+        (ev.by === supervisorAuthor || ev.worker === workerName)
+      ) {
+        return {
+          status: "failed",
+          errorMessage: `worker '${workerName}' terminated right after spawn (reason=${ev.reason ?? "unknown"})`,
+        };
+      }
+    }
+    return { status: "ready" };
+  }
+
+  const startupError = fresh.find(
+    (ev) =>
+      ev.kind === "error" &&
+      (ev.by === supervisorAuthor ||
+        (ev as { worker?: string }).worker === workerName),
+  );
+  if (startupError?.kind === "error") {
+    return {
+      status: "failed",
+      errorMessage: startupError.message ?? "supervisor reported startup error",
+    };
+  }
+
+  return { status: "pending" };
+}
+
+async function waitForSupervisorReady(args: {
+  channelName: string;
+  workerName: string;
+  project: string;
+  launched: LaunchedSupervisor;
+  readyTimeoutMs: number;
+  foreground: boolean;
+}): Promise<void> {
+  const {
+    channelName,
+    workerName,
+    project,
+    launched,
+    readyTimeoutMs,
+    foreground,
+  } = args;
+  const deadline = Date.now() + Math.max(0, readyTimeoutMs);
+
+  while (true) {
+    const events = await readChannelEvents(channelName, project);
+    const state = inspectStartupEvents(
+      events,
+      launched.baselineSeq,
+      workerName,
+    );
+
+    if (state.status === "ready") {
+      return;
+    }
+    if (state.status === "failed") {
+      throw new Error(
+        `Failed to start worker '${workerName}': ${state.errorMessage}.${formatLogSuffix(launched.logPath)}`,
+      );
+    }
+
+    const exitState = launched.getExitState();
+    if (exitState.exited) {
+      // One final read in case events.jsonl flushed right before exit.
+      const finalEvents = await readChannelEvents(channelName, project);
+      const finalState = inspectStartupEvents(
+        finalEvents,
+        launched.baselineSeq,
+        workerName,
+      );
+      if (finalState.status === "ready") {
+        return;
+      }
+      if (finalState.status === "failed") {
+        throw new Error(
+          `Failed to start worker '${workerName}': ${finalState.errorMessage}.${formatLogSuffix(launched.logPath)}`,
+        );
+      }
+
+      const logSuffix = formatLogSuffix(launched.logPath);
+      const windowsHint =
+        process.platform === "win32" && !foreground
+          ? " On Windows shells that terminate detached background processes when a command exits, re-run with `--foreground` in a background task or use `trellis channel run`."
+          : "";
+      throw new Error(
+        `Supervisor for worker '${workerName}' (pid ${launched.pid}) exited before writing durable 'spawned' event (code=${exitState.code ?? "null"}, signal=${exitState.signal ?? "null"}).${logSuffix}${windowsHint}`,
+      );
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out after ${readyTimeoutMs}ms waiting for worker '${workerName}' (pid ${launched.pid}) to write durable 'spawned' event.${formatLogSuffix(launched.logPath)}`,
+      );
+    }
+
+    await sleep(READY_POLL_INTERVAL_MS);
+  }
+}
+
+function cleanupFailedSpawn(
+  channelName: string,
+  workerName: string,
+  project: string,
+  launched: LaunchedSupervisor,
+): void {
+  if (!launched.getExitState().exited && launched.pid > 0) {
+    try {
+      launched.child.kill("SIGTERM");
+    } catch {
+      // already dead
+    }
+  }
+
+  // Only remove the pid file if it still points at our failed supervisor.
+  try {
+    if (fs.existsSync(launched.pidPath)) {
+      const current = fs.readFileSync(launched.pidPath, "utf-8").trim();
+      if (current === String(launched.pid)) {
+        fs.unlinkSync(launched.pidPath);
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  for (const suffix of [
+    "worker-pid",
+    "config",
+    "system-prompt.md",
+    "reservation",
+  ]) {
+    try {
+      fs.unlinkSync(workerFile(channelName, workerName, suffix, project));
+    } catch {
+      // already gone
+    }
+  }
+}
+
+async function waitForForegroundExit(
+  launched: LaunchedSupervisor,
+): Promise<void> {
+  const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"];
+  const handlers = new Map<NodeJS.Signals, () => void>();
+  for (const sig of signals) {
+    const handler = (): void => {
+      if (!launched.getExitState().exited) {
+        try {
+          launched.child.kill(sig);
+        } catch {
+          // already dead
+        }
+      }
+    };
+    handlers.set(sig, handler);
+    process.on(sig, handler);
+  }
+
+  try {
+    const exit = await launched.exitPromise;
+    if (exit.code !== null && exit.code !== 0) {
+      process.exitCode = exit.code;
+    } else if (exit.code === null && exit.signal !== null) {
+      process.exitCode = 1;
+    }
+  } finally {
+    for (const [sig, handler] of handlers) {
+      process.off(sig, handler);
+    }
+  }
+}
+
+function formatLogSuffix(logPath: string): string {
+  try {
+    if (!fs.existsSync(logPath)) {
+      return ` Log (${logPath}): not created.`;
+    }
+    const content = fs.readFileSync(logPath, "utf-8").trim();
+    if (!content) {
+      return ` Log (${logPath}): empty.`;
+    }
+    const excerpt =
+      content.length > MAX_LOG_EXCERPT_CHARS
+        ? `…${content.slice(-MAX_LOG_EXCERPT_CHARS)}`
+        : content;
+    return `\nLog (${logPath}):\n${excerpt}`;
+  } catch {
+    return ` Log: ${logPath}`;
+  }
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function processAlive(pid: number): boolean {
@@ -380,5 +741,13 @@ function resolveCliEntry(): string {
   // dist/commands/channel/spawn.js. The CLI entry is dist/cli/index.js.
   const here = fileURLToPath(import.meta.url);
   const distRoot = path.resolve(path.dirname(here), "..", "..");
-  return path.join(distRoot, "cli", "index.js");
+  const candidate = path.join(distRoot, "cli", "index.js");
+  if (fs.existsSync(candidate)) {
+    return candidate;
+  }
+  const builtFallback = path.resolve(distRoot, "..", "dist", "cli", "index.js");
+  if (fs.existsSync(builtFallback)) {
+    return builtFallback;
+  }
+  return candidate;
 }

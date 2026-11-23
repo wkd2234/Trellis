@@ -62,6 +62,9 @@ export async function channelRun(opts: RunOptions): Promise<void> {
       timeoutMs,
       files: opts.files,
       jsonls: opts.jsonls,
+      // Keep supervisor attached to `channel run`'s process tree / Windows
+      // Job Object so host shells don't reap a detached orphan prematurely.
+      detach: false,
     });
     workerName = spawned.worker;
 
@@ -71,6 +74,7 @@ export async function channelRun(opts: RunOptions): Promise<void> {
       text: opts.message,
       textFile: opts.textFile,
       stdin: opts.stdin,
+      deliveryMode: "requireRunningWorker",
     });
 
     await waitForDone(name, workerName, timeoutMs);

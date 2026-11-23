@@ -17,10 +17,17 @@ echo "Implement the schema for table X per .trellis/.../prd.md" \
 trellis channel wait impl-task --as dispatcher --from codex-impl --kind done --timeout 30m
 ```
 
-`spawn` forks a `channel __supervisor` worker that emits `spawned`, streams
-`progress`, and should end with `done`, `error`, or `killed`. Workers stay
-inbox-idle until a `send --to <worker>` (or a broadcast when
+`spawn` launches a `channel __supervisor` worker, captures startup stderr into
+`<worker>.log`, and waits until the durable `spawned` event is persisted before
+returning (failing loudly with log output if the supervisor crashes or times out).
+Workers stay inbox-idle until a `send --to <worker>` (or a broadcast when
 `--inbox-policy broadcastAndExplicit` is set) wakes them.
+
+> **Windows / host shells that reap detached processes**: if your shell tool
+> terminates detached background children when a synchronous command exits (e.g.
+> Windows Job Objects in IDE/agent shells), run `spawn` with `--foreground` inside
+> a background/daemon task (or use `trellis channel run` for one-shot tasks) so
+> the host tool runtime owns the supervisor lifecycle directly.
 
 Key `spawn` flags:
 
@@ -38,6 +45,8 @@ Key `spawn` flags:
 - `--inbox-policy <explicitOnly|broadcastAndExplicit>` — default `explicitOnly`.
 - `--idle-timeout <duration>` — OOM guard idle TTL (default `5m`; `0` disables).
 - `--max-live-workers <n>` — spawn-time live-worker budget (default `6`; `0` disables).
+- `--foreground` — keep the supervisor attached in the foreground until the worker exits (emits the ready JSON line as soon as `spawned` is durable; ideal for background-task runners on Windows).
+- `--ready-timeout <duration>` — max wait for durable `spawned` during startup (default `15s`).
 
 The success event `spawned` records `pid`, `provider`, `agent`, the injected
 `files`, and the resolved `manifests` so later spectators can audit context.
