@@ -45,7 +45,7 @@ describe("antigravity plugin templates", () => {
     expect(typeof manifest.description).toBe("string");
   });
 
-  it("wires SessionStart, PreInvocation, and PreToolUse (run_command + invoke_subagent) in hooks.json", () => {
+  it("wires SessionStart, PreInvocation, PreToolUse, and Stop in hooks.json", () => {
     const cfg = getHooksConfig();
     expect(cfg.targetPath).toBe("hooks.json");
     const parsed = JSON.parse(cfg.content) as {
@@ -56,6 +56,7 @@ describe("antigravity plugin templates", () => {
           matcher: string;
           hooks: { type: string; command: string; timeout: number }[];
         }[];
+        Stop: { type: string; command: string; timeout: number }[];
       };
     };
 
@@ -94,6 +95,13 @@ describe("antigravity plugin templates", () => {
             timeout: 30,
           },
         ],
+      },
+    ]);
+    expect(parsed.trellis.Stop).toEqual([
+      {
+        type: "command",
+        command: "{{PYTHON_CMD}} ./hooks/compaction-doc-sync.py",
+        timeout: 15,
       },
     ]);
   });
@@ -140,6 +148,9 @@ describe("antigravity plugin templates", () => {
     ).toBe(true);
     expect(
       files.has(".agents/plugins/trellis/hooks/inject-subagent-context.py"),
+    ).toBe(true);
+    expect(
+      files.has(".agents/plugins/trellis/hooks/compaction-doc-sync.py"),
     ).toBe(true);
     expect(
       files.has(".agents/plugins/trellis/agents/trellis-implement.md"),
@@ -758,5 +769,215 @@ describe("antigravity plugin hooks runtime contract", () => {
     };
     expect(parsed.injectSteps).toHaveLength(1);
     expect(parsed.hookSpecificOutput).toBeUndefined();
+  });
+
+  it("Stop hook triggers watermark doc check once, respects continuationActive, cooldown, and recent doc writes", () => {
+    const sessionDir = path.join(tmpDir, ".trellis", ".runtime", "sessions");
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(sessionDir, "antigravity_conv-stop-1.json"),
+      JSON.stringify({
+        platform: "antigravity",
+        current_task: ".trellis/tasks/01-agy-demo",
+      }),
+      "utf-8",
+    );
+
+    const transcriptPath = path.join(tmpDir, "transcript-agy.jsonl");
+    const writeJsonl = (rows: Record<string, unknown>[]): void => {
+      fs.writeFileSync(
+        transcriptPath,
+        rows.map((r) => JSON.stringify(r)).join("\n") + "\n",
+        "utf-8",
+      );
+    };
+
+    // 1. Below watermark (40k + 30k = 70k < 120k): no-op `{}`
+    writeJsonl([
+      { step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "q1" },
+      { step_index: 1, type: "PLANNER_RESPONSE", input_tokens: 40000, cache_read_tokens: 30000 },
+      { step_index: 2, type: "USER_INPUT", source: "USER_EXPLICIT", content: "q2" },
+      { step_index: 3, type: "PLANNER_RESPONSE", input_tokens: 20000, cache_read_tokens: 55000 },
+    ]);
+    const lowOut = runHook("compaction-doc-sync.py", {
+      conversationId: "conv-stop-1",
+      workspacePaths: [tmpDir],
+      transcriptPath,
+      hookEventName: "Stop",
+      terminationReason: "NO_TOOL_CALL",
+      continuationActive: false,
+      cwd: tmpDir,
+    });
+    expect(JSON.parse(lowOut)).toEqual({});
+
+    // 2. Crosses watermark via input_tokens + cache_read_tokens (25k + 100k = 125k >= 120k)
+    //    Writing to external `.gemini/.../scratch/` does NOT count as persisting repo docs.
+    writeJsonl([
+      { step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "q1" },
+      {
+        step_index: 1,
+        type: "PLANNER_RESPONSE",
+        input_tokens: 20000,
+        cache_read_tokens: 40000,
+        tool_calls: [
+          {
+            name: "write_file",
+            args: { Path: JSON.stringify("C:/Users/me/.gemini/antigravity-cli/brain/x/scratch/note.md") },
+          },
+        ],
+      },
+      { step_index: 2, type: "USER_INPUT", source: "USER_EXPLICIT", content: "q2" },
+      { step_index: 3, type: "PLANNER_RESPONSE", input_tokens: 25000, cache_read_tokens: 100000 },
+    ]);
+
+    // Guard check: if continuationActive is true, must no-op immediately
+    const loopGuardOut = runHook("compaction-doc-sync.py", {
+      conversationId: "conv-stop-1",
+      workspacePaths: [tmpDir],
+      transcriptPath,
+      hookEventName: "Stop",
+      terminationReason: "NO_TOOL_CALL",
+      continuationActive: true,
+      cwd: tmpDir,
+    });
+    expect(JSON.parse(loopGuardOut)).toEqual({});
+
+    // Normal completion: emits `decision: "continue"` with active task scope
+    const trigOut = runHook("compaction-doc-sync.py", {
+      conversationId: "conv-stop-1",
+      workspacePaths: [tmpDir],
+      transcriptPath,
+      hookEventName: "Stop",
+      terminationReason: "NO_TOOL_CALL",
+      continuationActive: false,
+      cwd: tmpDir,
+    });
+    const trigParsed = JSON.parse(trigOut) as { decision?: string; reason?: string };
+    expect(trigParsed.decision).toBe("continue");
+    expect(trigParsed.reason).toContain("<pre-compact-doc-check>");
+    expect(trigParsed.reason).toContain(".trellis/tasks/01-agy-demo");
+    expect(trigParsed.reason).toContain(".trellis/spec/");
+
+    // 3. Cooldown check: next turn at 135k (+10k < 50k cooldown) suppresses repeat
+    writeJsonl([
+      { step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "q1" },
+      { step_index: 2, type: "USER_INPUT", source: "USER_EXPLICIT", content: "q2" },
+      { step_index: 4, type: "USER_INPUT", source: "USER_EXPLICIT", content: "q3" },
+      { step_index: 5, type: "PLANNER_RESPONSE", input_tokens: 35000, cache_read_tokens: 100000 },
+    ]);
+    const cooldownOut = runHook("compaction-doc-sync.py", {
+      conversationId: "conv-stop-1",
+      workspacePaths: [tmpDir],
+      transcriptPath,
+      hookEventName: "Stop",
+      terminationReason: "NO_TOOL_CALL",
+      continuationActive: false,
+      cwd: tmpDir,
+    });
+    expect(JSON.parse(cooldownOut)).toEqual({});
+
+    // 4. Recent doc write suppression on a fresh session (`conv-stop-doc-written`):
+    //    JSON-stringified `Path` pointing at repo `.trellis/tasks/01-agy-demo/prd.md` resets turn counter.
+    const prdAbs = path.join(tmpDir, ".trellis", "tasks", "01-agy-demo", "prd.md");
+    writeJsonl([
+      { step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "q1" },
+      { step_index: 2, type: "USER_INPUT", source: "USER_EXPLICIT", content: "q2" },
+      {
+        step_index: 3,
+        type: "PLANNER_RESPONSE",
+        input_tokens: 30000,
+        cache_read_tokens: 100000,
+        tool_calls: [{ name: "write_file", args: { Path: JSON.stringify(prdAbs) } }],
+      },
+    ]);
+    const recentDocOut = runHook("compaction-doc-sync.py", {
+      conversationId: "conv-stop-doc-written",
+      workspacePaths: [tmpDir],
+      transcriptPath,
+      hookEventName: "Stop",
+      terminationReason: "NO_TOOL_CALL",
+      continuationActive: false,
+      cwd: tmpDir,
+    });
+    expect(JSON.parse(recentDocOut)).toEqual({});
+  });
+
+  it("PreInvocation injects one-shot <post-compact-doc-check> after a CHECKPOINT compaction boundary", () => {
+    const transcriptPath = path.join(tmpDir, "transcript-compact.jsonl");
+    const writeJsonl = (rows: Record<string, unknown>[]): void => {
+      fs.writeFileSync(
+        transcriptPath,
+        rows.map((r) => JSON.stringify(r)).join("\n") + "\n",
+        "utf-8",
+      );
+    };
+
+    // Turn 1 before compaction: normal workflow-state only
+    writeJsonl([
+      { step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "start" },
+      { step_index: 1, type: "PLANNER_RESPONSE", input_tokens: 50000, cache_read_tokens: 0 },
+    ]);
+    const turn1 = JSON.parse(
+      runHook("inject-workflow-state.py", {
+        conversationId: "conv-compact-agy",
+        workspacePaths: [tmpDir],
+        transcriptPath,
+        hookEventName: "PreInvocation",
+        invocationNum: 0,
+        initialNumSteps: 6,
+        cwd: tmpDir,
+      }),
+    ) as { injectSteps: { systemMessage: { systemMessage: string } }[] };
+    expect(turn1.injectSteps[0].systemMessage.systemMessage).not.toContain(
+      "<post-compact-doc-check>",
+    );
+
+    // Compaction writes a CHECKPOINT step; next user turn (invocationNum=0) receives one-shot check
+    writeJsonl([
+      { step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "start" },
+      { step_index: 1, type: "PLANNER_RESPONSE", input_tokens: 50000, cache_read_tokens: 0 },
+      { step_index: 2, type: "CHECKPOINT", content: "Compacted summary" },
+      { step_index: 3, type: "USER_INPUT", source: "USER_EXPLICIT", content: "next" },
+    ]);
+    const turn2 = JSON.parse(
+      runHook("inject-workflow-state.py", {
+        conversationId: "conv-compact-agy",
+        workspacePaths: [tmpDir],
+        transcriptPath,
+        hookEventName: "PreInvocation",
+        invocationNum: 0,
+        initialNumSteps: 2,
+        cwd: tmpDir,
+      }),
+    ) as { injectSteps: { systemMessage: { systemMessage: string } }[] };
+    const msg2 = turn2.injectSteps[0].systemMessage.systemMessage;
+    expect(msg2).toContain("<post-compact-doc-check>");
+    expect(msg2).toContain(transcriptPath);
+    expect(msg2).toContain("Active task: none (`no_task`)");
+    expect(msg2).toContain("Do NOT create temporary scratch/handoff files");
+
+    // Turn 3 after compaction (same CHECKPOINT): does NOT repeat <post-compact-doc-check>
+    writeJsonl([
+      { step_index: 0, type: "USER_INPUT", source: "USER_EXPLICIT", content: "start" },
+      { step_index: 1, type: "PLANNER_RESPONSE", input_tokens: 50000, cache_read_tokens: 0 },
+      { step_index: 2, type: "CHECKPOINT", content: "Compacted summary" },
+      { step_index: 3, type: "USER_INPUT", source: "USER_EXPLICIT", content: "next" },
+      { step_index: 4, type: "PLANNER_RESPONSE", input_tokens: 12000, cache_read_tokens: 0 },
+      { step_index: 5, type: "USER_INPUT", source: "USER_EXPLICIT", content: "follow up" },
+    ]);
+    const turn3 = JSON.parse(
+      runHook("inject-workflow-state.py", {
+        conversationId: "conv-compact-agy",
+        workspacePaths: [tmpDir],
+        transcriptPath,
+        hookEventName: "PreInvocation",
+        invocationNum: 0,
+        initialNumSteps: 4,
+        cwd: tmpDir,
+      }),
+    ) as { injectSteps: { systemMessage: { systemMessage: string } }[] };
+    expect(turn3.injectSteps[0].systemMessage.systemMessage).not.toContain(
+      "<post-compact-doc-check>",
+    );
   });
 });

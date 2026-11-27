@@ -16,6 +16,7 @@ const ALL_HOOK_FILES = [
   "inject-shell-session-context.py",
   "inject-workflow-state.py",
   "inject-subagent-context.py",
+  "compaction-doc-sync.py",
 ] as const;
 
 const EMPTY_EXCEPT_PASS_RE = /except[^\n]*:\n\s*pass\s*$/m;
@@ -126,6 +127,7 @@ describe("shared-hooks capability table", () => {
     }
 
     const SHELL_HOOK: SharedHookName = "inject-shell-session-context.py";
+    const COMPACT_HOOK: SharedHookName = "compaction-doc-sync.py";
 
     it("every platform declaring the shell-session hook invokes it from its config", () => {
       const declaring = Object.entries(SHARED_HOOKS_BY_PLATFORM).filter(
@@ -152,6 +154,29 @@ describe("shared-hooks capability table", () => {
           registrationsOf(platform, SHELL_HOOK),
           `${platform} invokes ${SHELL_HOOK} from its config but does not declare it — the config points at a script that is never installed`,
         ).toHaveLength(0);
+      }
+    });
+
+    it("every platform declaring compaction-doc-sync.py invokes it from its config, and none invoke it undeclared", () => {
+      const declaring = Object.entries(SHARED_HOOKS_BY_PLATFORM).filter(
+        ([, hooks]) => hooks.includes(COMPACT_HOOK),
+      );
+      expect(declaring.map(([p]) => p).sort()).toEqual(["antigravity", "claude"]);
+
+      for (const [platform, hooks] of Object.entries(
+        SHARED_HOOKS_BY_PLATFORM,
+      )) {
+        if (hooks.includes(COMPACT_HOOK)) {
+          expect(
+            registrationsOf(platform, COMPACT_HOOK),
+            `${platform} declares ${COMPACT_HOOK} but no ${platform} config template invokes it`,
+          ).not.toHaveLength(0);
+        } else {
+          expect(
+            registrationsOf(platform, COMPACT_HOOK),
+            `${platform} invokes ${COMPACT_HOOK} without declaring it`,
+          ).toHaveLength(0);
+        }
       }
     });
   });
@@ -230,7 +255,11 @@ describe("shared-hooks capability table", () => {
   });
 
   it("generated session and workflow-state hooks document fail-open exception suppression", () => {
-    for (const name of ["session-start.py", "inject-workflow-state.py"]) {
+    for (const name of [
+      "session-start.py",
+      "inject-workflow-state.py",
+      "compaction-doc-sync.py",
+    ]) {
       const hook = getSharedHookScripts().find((h) => h.name === name);
       expect(hook, `${name} is missing from shared-hooks/`).toBeDefined();
       const content = hook?.content ?? "";

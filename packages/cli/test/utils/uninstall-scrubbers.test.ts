@@ -21,6 +21,7 @@ const CLAUDE_DELETE_PATHS = [
   ".claude/hooks/session-start.py",
   ".claude/hooks/inject-subagent-context.py",
   ".claude/hooks/inject-workflow-state.py",
+  ".claude/hooks/compaction-doc-sync.py",
   ".claude/hooks/statusline.py",
 ];
 
@@ -58,6 +59,28 @@ describe("scrubHooksJson — nested schema", () => {
                 type: "command",
                 command: "python3 .claude/hooks/inject-workflow-state.py",
                 timeout: 5,
+              },
+            ],
+          },
+        ],
+        PreCompact: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command: "python3 .claude/hooks/compaction-doc-sync.py",
+                timeout: 15,
+              },
+            ],
+          },
+        ],
+        Stop: [
+          {
+            hooks: [
+              {
+                type: "command",
+                command: "python3 .claude/hooks/compaction-doc-sync.py",
+                timeout: 15,
               },
             ],
           },

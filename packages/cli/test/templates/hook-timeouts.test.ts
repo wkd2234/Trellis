@@ -209,6 +209,7 @@ describe("hook-timeouts: default timeouts survive Windows Python cold start (iss
       {
         SessionStart?: { timeout?: number }[];
         PreInvocation?: { timeout?: number }[];
+        Stop?: { timeout?: number }[];
       }
     >;
 
@@ -225,6 +226,15 @@ describe("hook-timeouts: default timeouts survive Windows Python cold start (iss
 
     it(`PreInvocation (inject-workflow-state) timeout >= ${MIN_USER_PROMPT_S}s`, () => {
       const hooks = parsed.trellis?.PreInvocation ?? [];
+      expect(hooks.length).toBeGreaterThan(0);
+      for (const hook of hooks) {
+        expect(typeof hook.timeout).toBe("number");
+        expect(hook.timeout as number).toBeGreaterThanOrEqual(MIN_USER_PROMPT_S);
+      }
+    });
+
+    it(`Stop (compaction-doc-sync) timeout >= ${MIN_USER_PROMPT_S}s`, () => {
+      const hooks = parsed.trellis?.Stop ?? [];
       expect(hooks.length).toBeGreaterThan(0);
       for (const hook of hooks) {
         expect(typeof hook.timeout).toBe("number");

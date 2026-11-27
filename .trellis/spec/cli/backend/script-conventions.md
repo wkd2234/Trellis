@@ -35,7 +35,8 @@ All workflow scripts target **Python 3.9+** for cross-platform compatibility (ma
 │   ├── cli_adapter.py    # Multi-platform CLI abstraction
 │   ├── git_context.py    # Entry shim → session_context + packages_context
 │   ├── session_context.py    # Session context generation (text/json/record)
-│   └── packages_context.py  # Package discovery and context
+│   ├── packages_context.py  # Package discovery and context
+│   └── compaction_sync.py   # Compaction watermark & post-compact doc sync checks
 ├── hooks/                # Lifecycle hook scripts (project-specific)
 │   └── linear_sync.py    # Example: sync tasks to Linear
 ├── task.py               # Entry shim → task_store + task_context

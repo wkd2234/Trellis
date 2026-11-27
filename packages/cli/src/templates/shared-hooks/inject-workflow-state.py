@@ -180,6 +180,22 @@ def _detect_platform(input_data: dict) -> str | None:
     return None
 
 
+def _consume_post_compact_notice(
+    root: Path, input_data: dict, platform: str | None
+) -> str | None:
+    if platform not in ("antigravity", "claude"):
+        return None
+    scripts_dir = root / ".trellis" / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    try:
+        from common.compaction_sync import consume_post_compact_notice  # type: ignore[import-not-found]
+
+        return consume_post_compact_notice(root, input_data, platform)
+    except Exception:
+        return None  # Optional compaction detector; keep per-turn hook non-fatal.
+
+
 def _resolve_active_task(root: Path, input_data: dict):
     scripts_dir = root / ".trellis" / "scripts"
     if str(scripts_dir) not in sys.path:
@@ -500,6 +516,10 @@ def main() -> int:
         parts.append(_codex_mode_banner(config))
         parts.append(breadcrumb)
         breadcrumb = "\n\n".join(parts)
+
+    post_compact_notice = _consume_post_compact_notice(root, data, platform)
+    if post_compact_notice:
+        breadcrumb = f"{post_compact_notice}\n\n{breadcrumb}"
 
     # Kiro (CLI userPromptSubmit / IDE promptSubmit) adds a hook's stdout
     # directly to the conversation context — no JSON envelope. Emit the bare

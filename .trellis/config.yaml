@@ -164,3 +164,22 @@ channel:
 #
 # prompt_injection:
 #   skip_keyword: "no-trellis"   # "" disables the escape hatch entirely
+
+#-------------------------------------------------------------------------------
+# Compaction Documentation Sync (Antigravity & Claude Code)
+#-------------------------------------------------------------------------------
+# Proactively nudges the AI to persist unsaved task artifacts, `.trellis/spec/`
+# conventions, and affected project docs before/after context compaction:
+# - `watermark_tokens`: context token threshold for the pre-compaction `Stop`
+#   check (`0` disables the pre-compaction watermark while keeping post-compact
+#   verification).
+# - `cooldown_tokens`: minimum additional context tokens before repeating the
+#   watermark reminder within the same compaction cycle.
+# - `min_turns_since_doc_write`: skip the watermark reminder when documentation
+#   was already written within the most recent N user turns.
+#
+# compaction_doc_sync:
+#   enabled: true
+#   watermark_tokens: 120000
+#   cooldown_tokens: 50000
+#   min_turns_since_doc_write: 2

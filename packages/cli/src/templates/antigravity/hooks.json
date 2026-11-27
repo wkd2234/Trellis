@@ -35,6 +35,13 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "{{PYTHON_CMD}} ./hooks/compaction-doc-sync.py",
+        "timeout": 15
+      }
     ]
   }
 }

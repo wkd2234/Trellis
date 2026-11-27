@@ -12,7 +12,7 @@ Platform support uses a **centralized registry pattern** (similar to Turborepo's
 - **Function registry**: `src/configurators/index.ts` — `PLATFORM_FUNCTIONS`, one line per platform. It holds no per-platform logic; the doc-comment at `index.ts:1-11` is the authoritative add-a-platform list
 - **Shared configurator utilities**: `src/configurators/shared.ts` — renderers (`resolvePlaceholders()`, `resolvePlaceholdersNeutral()`), resolvers (`resolveCommands()`, `resolveSkills()`, `resolveAllAsSkills()`, `resolveBundledSkills()`), map builders (`collectSkillTemplates()`, `collectBothTemplates()`, `collectSharedHooks()`), and the render/write pair (`renderTemplateMap()`, `writeTemplateMap()`). See `configurator-shared.md`
 - **Shared template utilities**: `src/templates/template-utils.ts` — `createTemplateReader()` factory that eliminates boilerplate across platform template modules
-- **Shared hooks**: `src/templates/shared-hooks/` — platform-independent Python hook scripts (session-start, inject-workflow-state, inject-subagent-context, inject-shell-session-context) written as-is to platform hook directories according to `SHARED_HOOKS_BY_PLATFORM`. Claude Code `statusLine` is not installed by default.
+- **Shared hooks**: `src/templates/shared-hooks/` — platform-independent Python hook scripts (session-start, inject-workflow-state, inject-subagent-context, inject-shell-session-context, compaction-doc-sync) written as-is to platform hook directories according to `SHARED_HOOKS_BY_PLATFORM`. Claude Code `statusLine` is not installed by default.
 - **Common templates**: `src/templates/common/` — single source of truth for commands (start, finish-work), single-file workflow skills (before-dev, brainstorm, check, break-loop, update-spec), and multi-file bundled skills (trellis-channel, trellis-meta, trellis-session-insight, trellis-spec-bootstrap) with `{{placeholder}}` resolution per platform
 - **Shared utilities**: `src/utils/compare-versions.ts` — `compareVersions()` with full prerelease support (used by cli, update, migrations)
 - **Derived helpers**: `ALL_MANAGED_DIRS`, `getConfiguredPlatforms()`, etc. — consumed by update, init, hash tracking
@@ -2314,6 +2314,79 @@ Note this is *only* about `{{…}}` placeholders. The separate `python3` → `py
 **Fix**: Wire the trigger into BOTH (a) the main-dispatch block near the end of `init()` AND (b) `handleReinit`'s `doAddDeveloper` / `doAddPlatforms` branch, whichever is relevant. Capture any pre-init filesystem state (e.g., `.developer` existence) in each path separately, before scripts that mutate it run.
 
 **Prevention**: Integration tests must cover the default path WITHOUT `force: true`. Any test using `force: true` bypasses `handleReinit` and is not testing real-user behavior. See "Bootstrap & Joiner Task Auto-Generation" above for the canonical two-point wiring pattern.
+
+---
+
+## Scenario: Compaction Doc Sync (Antigravity & Claude Code)
+
+### 1. Scope / Trigger
+
+Applies when adding or modifying proactive documentation sync checks around context compaction (`packages/cli/src/templates/shared-hooks/compaction-doc-sync.py`, `.trellis/scripts/common/compaction_sync.py`, `session-start.py`, and `inject-workflow-state.py`).
+
+### 2. Signatures
+
+```python
+# .trellis/scripts/common/compaction_sync.py
+def load_compaction_sync_config(repo_root: Path) -> CompactionSyncConfig: ...
+def inspect_transcript(repo_root: Path, input_data: dict[str, Any], platform: str | None) -> TranscriptSnapshot: ...
+def evaluate_stop_watermark(repo_root: Path, input_data: dict[str, Any], platform: str | None) -> str | None: ...
+def record_pre_compact(repo_root: Path, input_data: dict[str, Any], platform: str | None) -> None: ...
+def consume_post_compact_notice(repo_root: Path, input_data: dict[str, Any], platform: str | None, *, is_compact_event: bool = False) -> str | None: ...
+```
+
+### 3. Contracts
+
+- **Configuration (`.trellis/config.yaml`)**:
+  - `compaction_doc_sync.enabled` (`bool`, default `true`): master toggle for both pre- and post-compaction checks.
+  - `compaction_doc_sync.watermark_tokens` (`int`, default `120000`; `0` disables Layer 1 `Stop` watermark while keeping post-compaction checks).
+  - `compaction_doc_sync.cooldown_tokens` (`int`, default `50000`): minimum token growth required before firing another watermark continuation in the same compaction cycle.
+  - `compaction_doc_sync.min_turns_since_doc_write` (`int`, default `2`): minimum explicit user turns since the last repository doc write before Layer 1 triggers.
+- **Layer 1 (`Stop` hook — `compaction-doc-sync.py`)**:
+  - Antigravity context occupancy MUST sum `input_tokens + cache_read_tokens` on `PLANNER_RESPONSE` steps (cache hits shift prior context from `input_tokens` into `cache_read_tokens`); requires `terminationReason == "NO_TOOL_CALL"` and `continuationActive == false`; emits `{"decision": "continue", "reason": "<pre-compact-doc-check>..."}` or `{}`.
+  - Claude Code context occupancy sums `message.usage.{input_tokens, cache_creation_input_tokens, cache_read_input_tokens}`; requires `stop_hook_active == false`; emits `{"decision": "block", "reason": "<pre-compact-doc-check>..."}` or exits `0` with empty stdout.
+- **Layer 2 (Post-compaction check — non-blocking)**:
+  - Claude Code `PreCompact` records `pending_post_compact = true` and exits `0` (never blocks `/compact` or `auto` compact); `SessionStart` (`source == "compact"`) injects `<post-compact-doc-check>` pointing to `transcript_path` and `trellis mem` and clears the pending flag.
+  - Antigravity `PreInvocation` (`invocationNum == 0`) detects a new `CHECKPOINT` step (or steep step/token drop) in `transcript.jsonl`, prepends `<post-compact-doc-check>` referencing `transcriptPath` once, and updates `.trellis/.runtime/compaction-sync/<safe-key>.json`.
+- **Uninstall Scrubber Compatibility**: Hook commands in `.claude/settings.json` MUST remain two tokens (`{{PYTHON_CMD}} .claude/hooks/compaction-doc-sync.py`) with no trailing arguments.
+
+### 4. Validation & Error Matrix
+
+| Condition | Expected behavior |
+| --- | --- |
+| `continuationActive` (AGY) or `stop_hook_active` (Claude) is `true` | Immediate no-op (`{}` on AGY, empty stdout on Claude); prevents continuation loops |
+| `TRELLIS_HOOKS=0`, `TRELLIS_DISABLE_HOOKS=1`, or `*_NON_INTERACTIVE=1` | Immediate no-op |
+| Missing/unreadable `transcriptPath` / `transcript_path` or state write `OSError` | Fail open (`{}` on AGY, exit `0` on Claude) |
+| External scratch write (e.g. `.gemini/.../scratch/*.md`) | Ignored by `_is_doc_path`; does NOT suppress repo doc sync check |
+| Recent repo doc write (`< min_turns_since_doc_write` user turns ago) | Suppresses `Stop` watermark continuation |
+
+### 5. Good/Base/Bad Cases
+
+- **Good**: AGY reaches `25k input_tokens + 100k cache_read_tokens = 125k` across 2+ unsaved turns -> `Stop` continues once with active task scope; subsequent `/compact` writes `CHECKPOINT` -> next `PreInvocation` injects `<post-compact-doc-check>` once and re-arms watermark.
+- **Base**: Session stays below `120k` tokens and never compacts -> `Stop` returns `{}`, `startup`/`clear` `SessionStart` outputs remain byte-identical.
+- **Bad**: Reading `input_tokens` without `cache_read_tokens` on AGY -> cache-hit turns drop from `46k` to `18k` uncached tokens, falsely looking below watermark or falsely triggering token-drop compaction detection.
+
+### 6. Tests Required
+
+- `test/templates/shared-hooks.test.ts`: `compaction-doc-sync.py` declared iff invoked in platform config; fail-open exception check.
+- `test/templates/antigravity.test.ts`: `Stop` watermark (`input_tokens + cache_read_tokens`), `continuationActive` guard, cooldown, JSON-stringified `write_file` `Path` unwrapping, `.gemini/` scratch exclusion, and `PreInvocation` `CHECKPOINT` one-shot injection.
+- `test/templates/claude.test.ts`: `PreCompact` exit `0`, `SessionStart` (`compact` vs `startup`/`clear`), `Stop` usage sum, `stop_hook_active` guard, and `config.yaml` override.
+- `test/utils/uninstall-scrubbers.test.ts`: `PreCompact` and `Stop` cleanly scrubbed from `.claude/settings.json`.
+
+### 7. Wrong vs Correct
+
+#### Wrong
+
+```python
+# Misses cached prompt tokens on Antigravity cache hits; misclassifies cache hits as compaction drops
+context_tokens = int(step.get("input_tokens") or 0)
+```
+
+#### Correct
+
+```python
+# Monotonic active context occupancy across cache misses and cache hits
+context_tokens = int(step.get("input_tokens") or 0) + int(step.get("cache_read_tokens") or 0)
+```
 
 ---
 

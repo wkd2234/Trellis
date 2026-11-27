@@ -28,7 +28,8 @@ export type SharedHookName =
   | "session-start.py"
   | "inject-shell-session-context.py"
   | "inject-workflow-state.py"
-  | "inject-subagent-context.py";
+  | "inject-subagent-context.py"
+  | "compaction-doc-sync.py";
 
 export type SharedHookPlatform =
   | "claude"
@@ -101,6 +102,7 @@ export const SHARED_HOOKS_BY_PLATFORM: Record<
     "session-start.py",
     "inject-workflow-state.py",
     "inject-subagent-context.py",
+    "compaction-doc-sync.py",
   ],
   cursor: [
     "session-start.py",
@@ -118,6 +120,7 @@ export const SHARED_HOOKS_BY_PLATFORM: Record<
     "inject-shell-session-context.py",
     "inject-workflow-state.py",
     "inject-subagent-context.py",
+    "compaction-doc-sync.py",
   ],
   qoder: [
     "session-start.py",

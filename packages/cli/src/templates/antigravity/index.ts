@@ -4,7 +4,7 @@
  * Antigravity discovers workspace plugins under `.agents/plugins/<name>/`
  * (and supports global install via `agy plugin install`). Each plugin bundles:
  * - `plugin.json` — plugin manifest
- * - `hooks.json` — lifecycle hooks (`SessionStart`, `PreInvocation`, `PreToolUse`)
+ * - `hooks.json` — lifecycle hooks (`SessionStart`, `PreInvocation`, `PreToolUse`, `Stop`)
  * - `hooks/*.py` — shared Python hook scripts invoked relative to the plugin root
  * - `agents/*.md` — custom subagent definitions (`trellis-implement`, `trellis-check`, `trellis-research`)
  */

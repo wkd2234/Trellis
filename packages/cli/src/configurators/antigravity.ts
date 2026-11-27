@@ -18,7 +18,7 @@ const ANTIGRAVITY_PLUGIN_ROOT = ".agents/plugins/trellis";
  * - `.agent/skills/trellis-{name}/SKILL.md` — auto-triggered & bundled skills
  * - `.agents/plugins/trellis/` — native AGY plugin bundle:
  *   - `plugin.json` — manifest
- *   - `hooks.json` — SessionStart, PreInvocation, PreToolUse (run_command, invoke_subagent)
+ *   - `hooks.json` — SessionStart, PreInvocation, PreToolUse (run_command, invoke_subagent), Stop
  *   - `hooks/*.py` — shared Python hook scripts
  *   - `agents/*.md` — custom subagents (trellis-implement, trellis-check, trellis-research)
  */

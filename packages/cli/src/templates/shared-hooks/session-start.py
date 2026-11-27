@@ -372,6 +372,32 @@ def _resolve_update_hint(trellis_dir: Path, context_key: str | None) -> str | No
         return None  # Optional reminder; keep session-start non-fatal.
 
 
+def _resolve_post_compact_notice(
+    trellis_dir: Path, input_data: dict, platform: str | None
+) -> str | None:
+    """Return a one-shot post-compaction doc-sync check block when SessionStart
+    fires for `compact` (or when a pending pre-compact marker exists).
+    """
+    source = str(input_data.get("source") or "").strip().lower()
+    is_compact = source == "compact"
+    if not is_compact and platform != "claude":
+        return None
+    scripts_dir = trellis_dir / "scripts"
+    if str(scripts_dir) not in sys.path:
+        sys.path.insert(0, str(scripts_dir))
+    try:
+        from common.compaction_sync import consume_post_compact_notice  # type: ignore[import-not-found]
+
+        return consume_post_compact_notice(
+            trellis_dir.parent,
+            input_data,
+            platform or "claude",
+            is_compact_event=is_compact,
+        )
+    except Exception:
+        return None  # Optional compaction reminder; keep session-start non-fatal.
+
+
 def _resolve_active_task(trellis_dir: Path, input_data: dict):
     scripts_dir = trellis_dir / "scripts"
     if str(scripts_dir) not in sys.path:
@@ -955,6 +981,10 @@ Trellis compact SessionStart context. Use it to orient the session; load details
     # Check task status and inject structured tag
     task_status = _get_task_status(trellis_dir, hook_input)
     output.write(f"<task-status>\n{task_status}\n</task-status>\n\n")
+
+    post_compact_notice = _resolve_post_compact_notice(trellis_dir, hook_input, platform)
+    if post_compact_notice:
+        output.write(f"{post_compact_notice}\n\n")
 
     output.write("""<ready>
 Context loaded. Follow <task-status>. Load workflow/spec/task details only when needed.
