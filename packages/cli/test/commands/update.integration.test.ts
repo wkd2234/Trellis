@@ -1706,4 +1706,36 @@ describe("update() integration", () => {
       }
     });
   });
+
+  describe("npm registry override hint forwarding", () => {
+    it("forwards --registry / --npm-registry into trellis upgrade hints and rejects invalid URLs", async () => {
+      await setupProject();
+      // Simulate project being newer than CLI so downgrade hint prints
+      writeProjectFile(`${DIR_NAMES.WORKFLOW}/.version`, "99.0.0");
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      try {
+        // Explicit URL
+        await update({ registry: "https://registry.npmjs.org" });
+        const printedExplicit = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+        expect(printedExplicit).toContain(
+          "trellis upgrade --registry https://registry.npmjs.org",
+        );
+
+        // Bare `-r` (`registry: true`) defaults to Alibaba Cloud npmmirror
+        logSpy.mockClear();
+        await update({ registry: true });
+        const printedDefault = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+        expect(printedDefault).toContain(
+          "trellis upgrade --registry https://registry.npmmirror.com",
+        );
+      } finally {
+        logSpy.mockRestore();
+      }
+
+      await expect(
+        update({ npmRegistry: "https://registry.npmjs.org && whoami" }),
+      ).rejects.toThrow(/Invalid npm registry URL/);
+    });
+  });
 });

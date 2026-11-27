@@ -13,12 +13,13 @@ This command is intentionally separate from `trellis update`:
 ## User-facing contract
 
 ```text
-trellis upgrade [--tag <tag-or-version>] [--dry-run]
+trellis upgrade [--tag <tag-or-version>] [-r|--registry [url]] [--npm-registry [url]] [--dry-run]
 ```
 
 Behavior:
 
-- Builds and runs `npm install -g @mindfoldhq/trellis@<tag>`.
+- Builds and runs `npm install -g <release-tarball-url> [--registry <url>]`.
+- `-r, --registry [url]` (alias `--npm-registry [url]`, or `TRELLIS_NPM_REGISTRY` env var) overrides the user's configured `.npmrc` npm mirror when resolving runtime dependencies of the release tarball (for example on corporate machines whose internal npm mirror blocks or lacks public packages). Passing `-r` / `--registry` without a URL defaults to Alibaba Cloud npmmirror (`https://registry.npmmirror.com`). Explicit URLs must be valid `http://` or `https://` URLs free of whitespace and shell metacharacters.
 - POSIX execution must spawn `npm` directly without shell execution.
 - Windows execution must route through `cmd.exe /d /s /c npm install -g ...`
   instead of directly spawning `npm.cmd`.

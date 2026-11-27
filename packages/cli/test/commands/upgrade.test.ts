@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  DEFAULT_NPM_MIRROR_REGISTRY,
   buildReleaseTarballUrl,
   buildUpgradeCommand,
+  formatUpgradeCommandHint,
+  resolveNpmRegistry,
   resolveUpgradeTag,
   upgrade,
 } from "../../src/commands/upgrade.js";
@@ -143,5 +146,92 @@ describe("upgrade command", () => {
     );
 
     log.mockRestore();
+  });
+
+  it("supports --registry / --npm-registry and TRELLIS_NPM_REGISTRY on POSIX and Windows", () => {
+    const mirror = "https://registry.npmmirror.com";
+    const posixPlan = buildUpgradeCommand(
+      { tag: "v0.6.20", registry: mirror },
+      "0.6.19",
+      "linux",
+      "wkd2234/Trellis",
+      {},
+    );
+    expect(posixPlan).toMatchObject({
+      command: "npm",
+      args: [
+        "install",
+        "-g",
+        "https://github.com/wkd2234/Trellis/releases/download/v0.6.20/trellis-cli.tgz",
+        "--registry",
+        mirror,
+      ],
+      displayCommand: `npm install -g https://github.com/wkd2234/Trellis/releases/download/v0.6.20/trellis-cli.tgz --registry ${mirror}`,
+      registry: mirror,
+    });
+
+    const winEnvPlan = buildUpgradeCommand(
+      { tag: "latest" },
+      "0.6.19",
+      "win32",
+      "wkd2234/Trellis",
+      { TRELLIS_NPM_REGISTRY: "https://registry.npmjs.org" },
+    );
+    expect(winEnvPlan).toMatchObject({
+      command: "cmd.exe",
+      args: [
+        "/d",
+        "/s",
+        "/c",
+        "npm install -g https://github.com/wkd2234/Trellis/releases/latest/download/trellis-cli.tgz --registry https://registry.npmjs.org",
+      ],
+      registry: "https://registry.npmjs.org",
+    });
+
+    // CLI flag overrides TRELLIS_NPM_REGISTRY env
+    const overridePlan = buildUpgradeCommand(
+      { npmRegistry: mirror },
+      "0.6.19",
+      "darwin",
+      "wkd2234/Trellis",
+      { TRELLIS_NPM_REGISTRY: "https://registry.npmjs.org" },
+    );
+    expect(overridePlan.registry).toBe(mirror);
+    expect(formatUpgradeCommandHint(mirror)).toBe(
+      `trellis upgrade --registry ${mirror}`,
+    );
+    expect(formatUpgradeCommandHint()).toBe("trellis upgrade");
+
+    // Bare `-r` (`registry: true`) or empty `-r ""` defaults to Alibaba Cloud npmmirror
+    expect(resolveNpmRegistry(true, {})).toBe(DEFAULT_NPM_MIRROR_REGISTRY);
+    expect(resolveNpmRegistry("   ", {})).toBe(DEFAULT_NPM_MIRROR_REGISTRY);
+    expect(resolveNpmRegistry(undefined, { TRELLIS_NPM_REGISTRY: "  " })).toBeUndefined();
+    const bareFlagPlan = buildUpgradeCommand(
+      { registry: true },
+      "0.6.20",
+      "win32",
+      "wkd2234/Trellis",
+      {},
+    );
+    expect(bareFlagPlan.registry).toBe("https://registry.npmmirror.com");
+    expect(bareFlagPlan.displayCommand).toContain(
+      "--registry https://registry.npmmirror.com",
+    );
+  });
+
+  it("rejects malformed or shell-injected registry URLs", () => {
+    expect(() =>
+      resolveNpmRegistry("https://registry.npmjs.org && calc.exe", {}),
+    ).toThrow(/Invalid npm registry URL/);
+    expect(() =>
+      resolveNpmRegistry("https://registry.npmjs.org%PATH%", {}),
+    ).toThrow(/Invalid npm registry URL/);
+    expect(() => resolveNpmRegistry("ftp://registry.npmjs.org", {})).toThrow(
+      /Unsupported npm registry protocol/,
+    );
+    expect(() => resolveNpmRegistry("not-a-url", {})).toThrow(
+      /Invalid npm registry URL/,
+    );
+    expect(resolveNpmRegistry(undefined, {})).toBeUndefined();
   });
 });

@@ -4,6 +4,7 @@ import { VERSION } from "../constants/version.js";
 
 export const DEFAULT_UPGRADE_REPO = "wkd2234/Trellis";
 export const RELEASE_ASSET_NAME = "trellis-cli.tgz";
+export const DEFAULT_NPM_MIRROR_REGISTRY = "https://registry.npmmirror.com";
 
 export function resolveUpgradeRepo(): string {
   const envRepo = process.env.TRELLIS_UPGRADE_REPO?.trim();
@@ -17,6 +18,8 @@ export const UPGRADE_REPO = resolveUpgradeRepo();
 
 export interface UpgradeOptions {
   tag?: string;
+  registry?: string | boolean;
+  npmRegistry?: string | boolean;
   dryRun?: boolean;
 }
 
@@ -44,10 +47,65 @@ export interface UpgradeCommandPlan {
   displayCommand: string;
   target: string;
   tag: string;
+  registry?: string;
   binaryCheckCommand: string;
 }
 
 const RELEASE_TAG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const UNSAFE_REGISTRY_CHARS_RE = /[\s"'`;&|<>^%!\r\n()]/;
+
+export function resolveNpmRegistry(
+  requestedRegistry?: string | boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  if (requestedRegistry === false) {
+    return undefined;
+  }
+  if (
+    requestedRegistry === true ||
+    (typeof requestedRegistry === "string" && requestedRegistry.trim() === "")
+  ) {
+    return DEFAULT_NPM_MIRROR_REGISTRY;
+  }
+
+  const raw = (requestedRegistry ?? env.TRELLIS_NPM_REGISTRY)?.trim();
+  if (!raw) {
+    return undefined;
+  }
+
+  if (UNSAFE_REGISTRY_CHARS_RE.test(raw)) {
+    throw new Error(
+      `Invalid npm registry URL "${raw}". Provide a clean http(s) URL such as ${DEFAULT_NPM_MIRROR_REGISTRY} or https://registry.npmjs.org.`,
+    );
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(
+      `Invalid npm registry URL "${raw}". Provide a valid http(s) URL such as ${DEFAULT_NPM_MIRROR_REGISTRY} or https://registry.npmjs.org.`,
+    );
+  }
+
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(
+      `Unsupported npm registry protocol "${parsed.protocol}" in "${raw}". Use http:// or https://.`,
+    );
+  }
+
+  if (!parsed.hostname) {
+    throw new Error(`Invalid npm registry URL "${raw}". Hostname is required.`);
+  }
+
+  return raw;
+}
+
+export function formatUpgradeCommandHint(registry?: string): string {
+  return registry
+    ? `trellis upgrade --registry ${registry}`
+    : "trellis upgrade";
+}
 
 export function resolveUpgradeTag(
   _currentVersion: string = VERSION,
@@ -86,10 +144,17 @@ export function buildUpgradeCommand(
   currentVersion: string = VERSION,
   platform: NodeJS.Platform = process.platform,
   repo: string = resolveUpgradeRepo(),
+  env: NodeJS.ProcessEnv = process.env,
 ): UpgradeCommandPlan {
   const tag = resolveUpgradeTag(currentVersion, options.tag);
+  const registry = resolveNpmRegistry(
+    options.npmRegistry ?? options.registry,
+    env,
+  );
   const target = buildReleaseTarballUrl(tag, repo);
-  const npmArgs = ["install", "-g", target];
+  const npmArgs = registry
+    ? ["install", "-g", target, "--registry", registry]
+    : ["install", "-g", target];
   const displayCommand = `npm ${npmArgs.join(" ")}`;
   const spawnOptions: SpawnOptions = { stdio: "inherit", shell: false };
 
@@ -101,6 +166,7 @@ export function buildUpgradeCommand(
       displayCommand,
       target,
       tag,
+      registry,
       binaryCheckCommand: binaryCheckCommand(platform),
     };
   }
@@ -112,12 +178,13 @@ export function buildUpgradeCommand(
     displayCommand,
     target,
     tag,
+    registry,
     binaryCheckCommand: binaryCheckCommand(platform),
   };
 }
 
 function troubleshooting(plan: UpgradeCommandPlan): string {
-  return [
+  const lines = [
     "",
     "Troubleshooting:",
     `- Manual command: ${plan.displayCommand}`,
@@ -125,7 +192,13 @@ function troubleshooting(plan: UpgradeCommandPlan): string {
     `- Check which Trellis binary your shell resolves: ${plan.binaryCheckCommand}`,
     "- If this is a permissions error, fix your Node/npm install or npm prefix; Trellis does not run sudo.",
     "- If npm reports an existing binary or locked file, resolve that npm error manually; Trellis does not run --force.",
-  ].join("\n");
+  ];
+  if (!plan.registry) {
+    lines.push(
+      `- If an internal/corporate .npmrc mirror fails to resolve dependencies, retry with: trellis upgrade -r (uses ${DEFAULT_NPM_MIRROR_REGISTRY}) or trellis upgrade -r https://registry.npmjs.org`,
+    );
+  }
+  return lines.join("\n");
 }
 
 export async function upgrade(

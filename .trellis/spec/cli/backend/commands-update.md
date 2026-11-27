@@ -33,6 +33,7 @@ trellis update
   [-n, --create-new]     write `.new` copies for changed files
   [--allow-downgrade]    permit CLI < project version
   [--migrate]            apply pending file migrations (renames/deletes)
+  [-r, --registry [url]] override default npm registry URL forwarded into `trellis upgrade` hints (empty defaults to `https://registry.npmmirror.com`; alias `--npm-registry`; env `TRELLIS_NPM_REGISTRY`)
 ```
 
 The action handler in `cli/index.ts` constructs `UpdateOptions` and calls `commands/update.ts:update`. There is no env override surface today — flags are the only knobs. (Note: `setupProxy()` in `commands/update.ts:update` reads `HTTP_PROXY` / `HTTPS_PROXY` for the npm version check, but that's the only env input.)

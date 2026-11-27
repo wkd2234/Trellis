@@ -7,7 +7,11 @@ import inquirer from "inquirer";
 import { DIR_NAMES, FILE_NAMES, PATHS } from "../constants/paths.js";
 import type { AITool } from "../types/ai-tools.js";
 import { VERSION } from "../constants/version.js";
-import { resolveUpgradeRepo } from "./upgrade.js";
+import {
+  formatUpgradeCommandHint,
+  resolveNpmRegistry,
+  resolveUpgradeRepo,
+} from "./upgrade.js";
 import {
   getMigrationsForVersion,
   getAllMigrations,
@@ -93,6 +97,8 @@ export interface UpdateOptions {
   createNew?: boolean;
   allowDowngrade?: boolean;
   migrate?: boolean;
+  registry?: string | boolean;
+  npmRegistry?: string | boolean;
 }
 
 interface FileChange {
@@ -2115,6 +2121,12 @@ export async function update(options: UpdateOptions): Promise<void> {
     return;
   }
 
+  const explicitRegistry = options.npmRegistry ?? options.registry;
+  const hasExplicitRegistryFlag =
+    explicitRegistry !== undefined && explicitRegistry !== false;
+  const npmRegistry = resolveNpmRegistry(explicitRegistry);
+  const upgradeHintCommand = formatUpgradeCommandHint(npmRegistry);
+
   console.log(chalk.cyan("\nTrellis Update"));
   console.log(chalk.cyan("══════════════\n"));
 
@@ -2142,6 +2154,14 @@ export async function update(options: UpdateOptions): Promise<void> {
   }
   console.log("");
 
+  if (hasExplicitRegistryFlag && npmRegistry) {
+    console.log(
+      chalk.gray(
+        `Note: \`trellis update\` syncs local project files; to upgrade the global CLI via this npm mirror, run: ${upgradeHintCommand}\n`,
+      ),
+    );
+  }
+
   // Check if CLI is outdated compared to npm
   if (cliVsNpm < 0 && latestNpmVersion) {
     console.log(
@@ -2149,7 +2169,7 @@ export async function update(options: UpdateOptions): Promise<void> {
         `⚠️  Your CLI (${cliVersion}) is behind npm (${latestNpmVersion}).`,
       ),
     );
-    console.log(chalk.yellow(`   Run: trellis upgrade\n`));
+    console.log(chalk.yellow(`   Run: ${upgradeHintCommand}\n`));
   }
 
   // Check for downgrade situation
@@ -2163,7 +2183,7 @@ export async function update(options: UpdateOptions): Promise<void> {
 
     if (!options.allowDowngrade) {
       console.log(chalk.gray("Solutions:"));
-      console.log(chalk.gray(`  1. Update your CLI: trellis upgrade`));
+      console.log(chalk.gray(`  1. Update your CLI: ${upgradeHintCommand}`));
       console.log(
         chalk.gray(`  2. Force downgrade: trellis update --allow-downgrade\n`),
       );

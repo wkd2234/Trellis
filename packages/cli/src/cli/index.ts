@@ -78,7 +78,10 @@ program
   .option("--kilo", "Include Kilo CLI commands")
   .option("--kiro", "Include Kiro Code skills")
   .option("--gemini", "Include Gemini CLI commands")
-  .option("--antigravity", "Include Antigravity plugin, hooks, agents, and workflows")
+  .option(
+    "--antigravity",
+    "Include Antigravity plugin, hooks, agents, and workflows",
+  )
   .option("--devin", "Include Devin workflows")
   .option("--windsurf", "Deprecated alias for --devin (Windsurf was renamed)")
   .option("--qoder", "Include Qoder commands")
@@ -162,6 +165,11 @@ program
   .option("-n, --create-new", "Create .new copies for all changed files")
   .option("--allow-downgrade", "Allow downgrading to an older version")
   .option("--migrate", "Apply pending file migrations (renames/deletions)")
+  .option(
+    "-r, --registry [url]",
+    "Override default npm registry URL for CLI upgrade hints (empty defaults to https://registry.npmmirror.com; or set TRELLIS_NPM_REGISTRY)",
+  )
+  .option("--npm-registry [url]", "Alias for --registry")
   .action(async (options: Record<string, unknown>) => {
     try {
       await update({
@@ -171,6 +179,8 @@ program
         createNew: options.createNew as boolean,
         allowDowngrade: options.allowDowngrade as boolean,
         migrate: options.migrate as boolean,
+        registry: options.registry as string | boolean | undefined,
+        npmRegistry: options.npmRegistry as string | boolean | undefined,
       });
     } catch (error) {
       console.error(
@@ -191,11 +201,18 @@ program
     "--tag <tag>",
     "GitHub Release tag or version to install (default: latest; e.g., v0.6.18 or 0.6.17-agy.1)",
   )
+  .option(
+    "-r, --registry [url]",
+    "Override default npm registry URL when installing dependencies (empty defaults to https://registry.npmmirror.com; or set TRELLIS_NPM_REGISTRY)",
+  )
+  .option("--npm-registry [url]", "Alias for --registry")
   .option("--dry-run", "Print the install command without running it")
   .action(async (options: Record<string, unknown>) => {
     try {
       await upgrade({
         tag: options.tag as string | undefined,
+        registry: options.registry as string | boolean | undefined,
+        npmRegistry: options.npmRegistry as string | boolean | undefined,
         dryRun: options.dryRun as boolean,
       });
     } catch (error) {
